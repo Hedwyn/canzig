@@ -13,7 +13,7 @@ Clone this package and run `zig build run -- <your-interface-name>` (e.g., `zig 
 The demo code will send a single message, then wait (potentially forever) for a message. You can send a message manually with `cansend` command from `can-utils`.<br><br>
 Example usage is as follows:
 ```zig
-const can = @import("socketcan.zig);
+const can = @import("socketcan.zig");
 const fd = try can.openSocketCan("can0");
 defer can.closeSocketCan(fd);
 // Sending 12345678 in hex to address 123

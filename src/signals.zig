@@ -3,7 +3,8 @@ const std = @import("std");
 
 const StructErrors = error{
     NotByteAligned,
-    Overflow,
+    DecodeOverflow,
+    NotImplemented,
 };
 
 pub fn assertInteger(target_type: std.builtin.Type) void {
@@ -19,6 +20,14 @@ const CanSignal = struct {
     scale: f64 = 1.0,
     offset: f64 = 0.0,
     name: []const u8,
+
+    pub fn isInteger(self: CanSignal) bool {
+        return (self.scale == 1.0 and self.offset == 0.0);
+    }
+
+    pub fn isFloat(self: CanSignal) bool {
+        return (self.scale != 1.0 or self.offset != 0.0);
+    }
 };
 
 pub fn get_total_byte_size(signals: []CanSignal) StructErrors!usize {
@@ -44,14 +53,23 @@ pub fn CanFrame(comptime signals: []CanSignal) type {
             return _size;
         }
 
-        pub fn decode(self: Self, data: u64, container: anytype) void {
+        pub fn decode(self: Self, data: u64, container: anytype) StructErrors!void {
             // const bitsize = _size * 8;
             inline for (0..signals.len) |i| {
                 const signal = comptime self.signals[i];
                 const signal_mask = ((1 << signal.length) - 1) << signal.position;
                 const signal_data = (data & signal_mask) >> signal.position;
+
                 const T = @TypeOf(@field(container, signal.name));
-                @field(container, signal.name) = @as(T, @truncate(signal_data));
+                // applying scale offset if necessary
+                if (comptime signal.isFloat()) {
+                    const float_value: f64 = @floatFromInt(signal_data);
+                    const scaled_value = float_value * signal.scale + signal.offset;
+                    @field(container, signal.name) = @floatCast(scaled_value);
+                } else {
+                    const casted_value = std.math.cast(T, signal_data) orelse return StructErrors.DecodeOverflow;
+                    @field(container, signal.name) = casted_value;
+                }
             }
         }
     };
@@ -114,6 +132,26 @@ test "decode message" {
     const my_message: MyMessage = .{ .name = "my_message" };
     const Container = struct { test_signal: u8 };
     var container: Container = undefined;
-    my_message.decode(test_data, &container);
+    try my_message.decode(test_data, &container);
     try std.testing.expectEqual(container.test_signal, 0x42);
+}
+
+test "decode float message" {
+    const signal_array: [1]CanSignal = comptime .{.{
+        .length = 8,
+        .position = 0,
+        .scale = 0.5,
+        .offset = 1.5,
+        .name = "test_signal",
+    }};
+    const test_data: u64 = 17;
+    const MyMessage = CanFrame(@constCast(&signal_array));
+    const my_message: MyMessage = .{ .name = "my_message" };
+    const Container = struct { test_signal: f32 };
+    var container: Container = undefined;
+    try my_message.decode(test_data, &container);
+    try std.testing.expectEqual(
+        10.0,
+        container.test_signal,
+    );
 }
