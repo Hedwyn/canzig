@@ -5,17 +5,28 @@ const signals = @import("signals.zig");
 const Element = xml.Element;
 const fmt = std.fmt;
 
+const CanSignal = signals.CanSignal;
+
 const assert = std.debug.assert;
 
-const CanMessage = struct {
-    id: u32,
-    interval: f64,
+const SignalDefinition = struct {
+    structure: CanSignal,
+    next: ?*SignalDefinition = null,
 };
 
-const KcdFsm = union(enum) {
-    init: void,
-    bus: []const u8,
-    // message: CanMessage,
+const MessageDefinition = struct {
+    id: u32,
+    interval: ?f64 = null,
+    length: usize,
+    head: ?*CanSignal = null,
+};
+
+const KcdTags = enum { Bus, Message, Signal };
+
+const KcdElement = union(KcdTags) {
+    Bus: []const u8,
+    Message: MessageDefinition,
+    Signal: SignalDefinition,
 };
 
 const KcdParseErrors = error{
@@ -24,6 +35,15 @@ const KcdParseErrors = error{
     InvalidFloatValue,
     InvalidIntegerValue,
 };
+
+pub fn getTag(element: *Element) ?KcdTags {
+    inline for (std.meta.fields(KcdTags)) |field| {
+        if (std.mem.eql(u8, element.tag, field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+    return null;
+}
 
 pub fn parseKcd(allocator: Allocator, xml_content: []u8) void {
     const document = try xml.parse(allocator, xml_content);
@@ -82,30 +102,26 @@ pub fn getAttribute(comptime attr_name: []const u8, element: *Element, container
 pub fn buildContainerFromElement(comptime T: type, element: *Element) KcdParseErrors!T {
     var container: T = undefined;
     inline for (std.meta.fields(T)) |field| {
-        try getAttribute(field.name, element, &container);
+        getAttribute(field.name, element, &container) catch {};
     }
     return container;
 }
 
-pub fn processNextState(state: KcdFsm, next_element: *Element) KcdParseErrors!?KcdFsm {
-    const tag = next_element.tag;
-    switch (state) {
-        .init => {
-            if (!std.mem.eql(u8, tag, "Bus")) {
-                std.log.debug("[State init] Ignoring tag {s}", .{tag});
-                return null;
-            }
-            return KcdFsm{ .bus = try getAttributeAs([]const u8, "name", next_element) };
+pub fn extractKcdInfo(next_element: *Element) KcdParseErrors!?KcdElement {
+    const tag = getTag(next_element).?;
+    switch (tag) {
+        .Bus => {
+            return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
         },
-        .bus => {
-            if (!std.mem.eql(u8, tag, "Message")) {
-                std.log.debug("[State bus] Ignoring tag {s}", .{tag});
-                return null;
-            }   
-        }
-        else => return KcdParseErrors.AttributeMissing,
+        .Message => {
+            var definition: MessageDefinition = undefined;
+            definition.id = try getAttributeAs(u32, "id", next_element);
+            definition.length = try getAttributeAs(usize, "length", next_element);
+            definition.interval = try getAttributeAs(f64, "interval", next_element);
+            return KcdElement{ .Message = definition };
+        },
+        else => return null,
     }
-    return KcdParseErrors.AttributeMissing;
 }
 
 test "get attribute str" {
@@ -231,7 +247,7 @@ test "get attribute as" {
     try std.testing.expectEqual(3.14, value);
 }
 
-test "test fsm parse state bus" {
+test "get tag" {
     var attributes = [_]xml.Attribute{
         .{ .name = "name", .value = "TestBus" },
     };
@@ -240,8 +256,18 @@ test "test fsm parse state bus" {
         .attributes = &attributes,
     };
 
-    var state: KcdFsm = .init;
-    state = try processNextState(state, &test_element) orelse state;
-    std.debug.print("State={any}", .{state});
-    try std.testing.expect(std.meta.eql(KcdFsm{ .bus = "TestBus" }, state));
+    try std.testing.expectEqual(getTag(&test_element).?, KcdTags.Bus);
+}
+
+test "test fsm get info" {
+    var attributes = [_]xml.Attribute{
+        .{ .name = "name", .value = "TestBus" },
+    };
+    var test_element: Element = .{
+        .tag = "Bus",
+        .attributes = &attributes,
+    };
+
+    const kcd_info = try extractKcdInfo(&test_element) orelse unreachable;
+    try std.testing.expect(std.meta.eql(KcdElement{ .Bus = "TestBus" }, kcd_info));
 }

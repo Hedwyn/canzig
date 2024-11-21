@@ -14,7 +14,7 @@ pub fn assertInteger(target_type: std.builtin.Type) void {
     }
 }
 
-const CanSignal = struct {
+pub const CanSignal = struct {
     position: usize,
     length: usize,
     scale: f64 = 1.0,
