@@ -3,6 +3,7 @@ const xml = @import("xml.zig");
 const Allocator = std.mem.Allocator;
 const signals = @import("signals.zig");
 const Element = xml.Element;
+const Content = xml.Content;
 const fmt = std.fmt;
 
 const CanSignal = signals.CanSignal;
@@ -18,15 +19,38 @@ const MessageDefinition = struct {
     id: u32,
     interval: ?f64 = null,
     length: usize,
-    head: ?*CanSignal = null,
+    head: ?*SignalDefinition = null,
+
+    pub fn addSignal(self: *MessageDefinition, signal: *SignalDefinition) void {
+        const tail = if (self.head) |head| head else {
+            self.head = signal;
+            return;
+        };
+        var prev = tail;
+        var next = tail.next;
+        // finding the last slot
+        while (next) |node| {
+            prev = node;
+            next = node.next;
+        }
+        prev.next = signal;
+    }
 };
 
 const KcdTags = enum { Bus, Message, Signal };
 
 const KcdElement = union(KcdTags) {
     Bus: []const u8,
-    Message: MessageDefinition,
-    Signal: SignalDefinition,
+    Message: *MessageDefinition,
+    Signal: *SignalDefinition,
+
+    pub fn free(self: *KcdElement, allocator: Allocator) void {
+        switch (self.*) {
+            .Message => |p| allocator.destroy(p),
+            .Signal => |p| allocator.destroy(p),
+            else => {},
+        }
+    }
 };
 
 const KcdParseErrors = error{
@@ -34,6 +58,7 @@ const KcdParseErrors = error{
     AttributeMissing,
     InvalidFloatValue,
     InvalidIntegerValue,
+    SignalOutsideMessage,
 };
 
 pub fn getTag(element: *Element) ?KcdTags {
@@ -107,20 +132,43 @@ pub fn buildContainerFromElement(comptime T: type, element: *Element) KcdParseEr
     return container;
 }
 
-pub fn extractKcdInfo(next_element: *Element) KcdParseErrors!?KcdElement {
+pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErrors!?KcdElement {
     const tag = getTag(next_element).?;
     switch (tag) {
         .Bus => {
             return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
         },
         .Message => {
-            var definition: MessageDefinition = undefined;
+            var definition = allocator.create(MessageDefinition) catch unreachable;
             definition.id = try getAttributeAs(u32, "id", next_element);
             definition.length = try getAttributeAs(usize, "length", next_element);
             definition.interval = try getAttributeAs(f64, "interval", next_element);
             return KcdElement{ .Message = definition };
         },
         else => return null,
+    }
+}
+
+pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!void {
+    var it = root.iterator();
+    var current_message: ?*MessageDefinition = null;
+    while (it.next()) |content| {
+        const element = switch (content.*) {
+            .element => |e| e,
+            else => continue,
+        };
+        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
+        switch (kcd_info) {
+            .Message => |m| current_message = m,
+            .Signal => |signal| {
+                if (current_message) |msg| {
+                    msg.addSignal(signal);
+                } else {
+                    return KcdParseErrors.SignalOutsideMessage;
+                }
+            },
+            else => {},
+        }
     }
 }
 
@@ -267,7 +315,26 @@ test "test fsm get info" {
         .tag = "Bus",
         .attributes = &attributes,
     };
-
-    const kcd_info = try extractKcdInfo(&test_element) orelse unreachable;
+    const allocator = std.heap.page_allocator;
+    var kcd_info = try extractKcdInfo(&test_element, allocator) orelse unreachable;
+    defer kcd_info.free(allocator);
     try std.testing.expect(std.meta.eql(KcdElement{ .Bus = "TestBus" }, kcd_info));
+}
+
+test "test process elements" {
+    var attributes = [_]xml.Attribute{
+        .{ .name = "name", .value = "TestBus" },
+    };
+    var test_element: Element = .{
+        .tag = "Bus",
+        .attributes = &attributes,
+    };
+    var content = [_]Content{.{ .element = &test_element }};
+    var root = Element{
+        .tag = "root",
+        .children = &content,
+    };
+    const allocator = std.heap.page_allocator;
+
+    try processXmlElements(&root, allocator);
 }
