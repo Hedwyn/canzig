@@ -2,6 +2,7 @@ const std = @import("std");
 const xml = @import("xml.zig");
 const Allocator = std.mem.Allocator;
 const signals = @import("signals.zig");
+const ArrayList = std.ArrayList;
 const Element = xml.Element;
 const Content = xml.Content;
 const fmt = std.fmt;
@@ -16,6 +17,7 @@ const SignalDefinition = struct {
 };
 
 const MessageDefinition = struct {
+    name: []const u8,
     id: u32,
     interval: ?f64 = null,
     length: usize,
@@ -35,6 +37,10 @@ const MessageDefinition = struct {
         }
         prev.next = signal;
     }
+};
+
+const KcdDatabase = struct {
+    messages: ArrayList(MessageDefinition),
 };
 
 const KcdTags = enum { Bus, Message, Signal };
@@ -70,10 +76,10 @@ pub fn getTag(element: *Element) ?KcdTags {
     return null;
 }
 
-pub fn parseKcd(allocator: Allocator, xml_content: []u8) void {
+pub fn parseKcd(allocator: Allocator, xml_content: []u8) !ArrayList(*MessageDefinition) {
     const document = try xml.parse(allocator, xml_content);
     defer document.deinit();
-    // TODO
+    return try processXmlElements(document.root, allocator);
 }
 
 pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element: *Element) KcdParseErrors!T {
@@ -133,13 +139,22 @@ pub fn buildContainerFromElement(comptime T: type, element: *Element) KcdParseEr
 }
 
 pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErrors!?KcdElement {
-    const tag = getTag(next_element).?;
+    std.debug.print(
+        "\n--> Element is {}, tag {s}\n",
+        .{ next_element, next_element.tag },
+    );
+
+    const tag = if (getTag(next_element)) |t| t else {
+        return null;
+    };
+    std.debug.print("\n--> Tag is {}\n", .{tag});
     switch (tag) {
         .Bus => {
             return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
         },
         .Message => {
             var definition = allocator.create(MessageDefinition) catch unreachable;
+            definition.name = try getAttributeAs([]const u8, "name", next_element);
             definition.id = try getAttributeAs(u32, "id", next_element);
             definition.length = try getAttributeAs(usize, "length", next_element);
             definition.interval = try getAttributeAs(f64, "interval", next_element);
@@ -149,17 +164,23 @@ pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErro
     }
 }
 
-pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!void {
+pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!ArrayList(*MessageDefinition) {
     var it = root.iterator();
     var current_message: ?*MessageDefinition = null;
+    var database = ArrayList(*MessageDefinition).init(allocator);
     while (it.next()) |content| {
         const element = switch (content.*) {
             .element => |e| e,
             else => continue,
         };
         const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
+        std.debug.print("\n--> Parsing {}", .{kcd_info});
+
         switch (kcd_info) {
-            .Message => |m| current_message = m,
+            .Message => |m| {
+                current_message = m;
+                database.append(m) catch unreachable;
+            },
             .Signal => |signal| {
                 if (current_message) |msg| {
                     msg.addSignal(signal);
@@ -170,6 +191,7 @@ pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!v
             else => {},
         }
     }
+    return database;
 }
 
 test "get attribute str" {
@@ -336,5 +358,22 @@ test "test process elements" {
     };
     const allocator = std.heap.page_allocator;
 
-    try processXmlElements(&root, allocator);
+    const database = try processXmlElements(&root, allocator);
+    std.debug.print("obtained={}\n", .{database});
+
+    for (database.items) |msg| {
+        std.debug.print("Msg = {any}", .{msg.*});
+    }
+}
+
+test "parse kcd" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const file = try std.fs.cwd().openFile("can_definition_sample.kcd", .{});
+
+    const reader = file.reader();
+    const buffer = try reader.readAllAlloc(allocator, 10_000_000);
+    const database = try parseKcd(allocator, buffer);
+    std.debug.print("\n\nDatabase = {}\n", .{database});
 }
