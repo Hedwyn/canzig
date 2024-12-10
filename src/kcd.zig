@@ -87,7 +87,11 @@ pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element:
         if (std.mem.eql(u8, attr.name, attr_name)) {
             switch (@typeInfo(T)) {
                 .Int => {
-                    return fmt.parseInt(T, attr.value, 10) catch {
+                    var val = attr.value;
+                    const is_hex = val.len >= 2 and val[0] == '0' and (val[1] == 'x' or val[1] == 'X');
+                    const base: u8 = if (is_hex) 16 else 10;
+                    val = if (is_hex) val[2..] else val;
+                    return fmt.parseInt(T, val, base) catch {
                         return KcdParseErrors.InvalidIntegerValue;
                     };
                 },
@@ -139,15 +143,9 @@ pub fn buildContainerFromElement(comptime T: type, element: *Element) KcdParseEr
 }
 
 pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErrors!?KcdElement {
-    std.debug.print(
-        "\n--> Element is {}, tag {s}\n",
-        .{ next_element, next_element.tag },
-    );
-
     const tag = if (getTag(next_element)) |t| t else {
         return null;
     };
-    std.debug.print("\n--> Tag is {}\n", .{tag});
     switch (tag) {
         .Bus => {
             return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
@@ -156,25 +154,23 @@ pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErro
             var definition = allocator.create(MessageDefinition) catch unreachable;
             definition.name = try getAttributeAs([]const u8, "name", next_element);
             definition.id = try getAttributeAs(u32, "id", next_element);
-            definition.length = try getAttributeAs(usize, "length", next_element);
-            definition.interval = try getAttributeAs(f64, "interval", next_element);
+            definition.length = getAttributeAs(usize, "length", next_element) catch 1;
+            definition.interval = getAttributeAs(f64, "interval", next_element) catch null;
             return KcdElement{ .Message = definition };
         },
         else => return null,
     }
 }
 
-pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!ArrayList(*MessageDefinition) {
-    var it = root.iterator();
+fn processBusElement(bus: *Element, allocator: Allocator, database: *ArrayList(*MessageDefinition)) KcdParseErrors!void {
+    var it = bus.iterator();
     var current_message: ?*MessageDefinition = null;
-    var database = ArrayList(*MessageDefinition).init(allocator);
     while (it.next()) |content| {
         const element = switch (content.*) {
             .element => |e| e,
             else => continue,
         };
         const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
-        std.debug.print("\n--> Parsing {}", .{kcd_info});
 
         switch (kcd_info) {
             .Message => |m| {
@@ -187,6 +183,26 @@ pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!A
                 } else {
                     return KcdParseErrors.SignalOutsideMessage;
                 }
+            },
+            else => {},
+        }
+    }
+}
+
+pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!ArrayList(*MessageDefinition) {
+    var database = ArrayList(*MessageDefinition).init(allocator);
+    var it = root.iterator();
+    while (it.next()) |content| {
+        const element = switch (content.*) {
+            .element => |e| e,
+            else => continue,
+        };
+        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
+
+        switch (kcd_info) {
+            .Bus => |name| {
+                std.log.info("Parsing bus {s}\n", .{name});
+                try processBusElement(element, allocator, &database);
             },
             else => {},
         }
@@ -359,10 +375,9 @@ test "test process elements" {
     const allocator = std.heap.page_allocator;
 
     const database = try processXmlElements(&root, allocator);
-    std.debug.print("obtained={}\n", .{database});
 
     for (database.items) |msg| {
-        std.debug.print("Msg = {any}", .{msg.*});
+        std.log.debug("Msg = {any}", .{msg.*});
     }
 }
 
@@ -375,5 +390,5 @@ test "parse kcd" {
     const reader = file.reader();
     const buffer = try reader.readAllAlloc(allocator, 10_000_000);
     const database = try parseKcd(allocator, buffer);
-    std.debug.print("\n\nDatabase = {}\n", .{database});
+    std.log.debug("Database = {}\n", .{database});
 }
