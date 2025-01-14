@@ -1,0 +1,3 @@
+[submodule "deps/zig-easy-cli"]
+	path = deps/zig-easy-cli
+	url = git@github.com:Hedwyn/zig-easy-cli.git

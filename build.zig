@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const zig_easy_cli = b.dependency("zig_easy_cli", .{});
     const lib = b.addStaticLibrary(.{
         .name = "canzig",
         // In this case the main source file is merely a path, however, in more
@@ -23,7 +24,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
@@ -35,7 +35,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
+    exe.root_module.addImport("parser", zig_easy_cli.module("parser"));
+    // exe.root_module.addImport("zig_easy_cli", zig_easy_cli);
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

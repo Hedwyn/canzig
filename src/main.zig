@@ -1,24 +1,22 @@
 const std = @import("std");
 const can = @import("socketcan.zig");
 const xml = @import("xml.zig");
+const easycli = @import("parser");
 const debugPrint = std.log.debug;
 
 const default_can_if = "vcan0";
 
+const Options = struct {
+    interface: []const u8,
+    db_path: []const u8,
+};
+
 pub fn main() !void {
-    var args_it = std.process.args();
-    // First arg is exe name
-    _ = args_it.next();
-    const user_can_if: ?[]const u8 = args_it.next();
-    const can_if = user_can_if orelse default_can_if;
-    const db_path = args_it.next() orelse unreachable;
-
-    if (user_can_if == null) {
-        std.debug.print("Defaulting to {s}\n", .{can_if});
-    } else {
-        std.debug.print("Using {s}\n", .{can_if});
-    }
-
+    const ParserT = easycli.CliParser(Options, struct {});
+    const params = if (try ParserT.runStandalone(.{})) |p| p else return;
+    const can_if = params.options.interface;
+    const db_path = params.options.db_path;
+    std.debug.print("Can if is {s}\n", .{can_if});
     const fd = try can.openSocketCan(can_if);
     defer can.closeSocketCan(fd);
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };

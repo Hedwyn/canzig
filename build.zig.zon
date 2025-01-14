@@ -51,6 +51,9 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        .zig_easy_cli = .{
+            .path = "deps/zig-easy-cli",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.
