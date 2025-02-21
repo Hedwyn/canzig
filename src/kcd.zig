@@ -36,11 +36,11 @@ const MessageDefinition = struct {
             next = node.next;
         }
         prev.next = signal;
+        std.log.debug("Added signal {s} to {s}", .{
+            self.name,
+            signal.structure.name,
+        });
     }
-};
-
-const KcdDatabase = struct {
-    messages: ArrayList(MessageDefinition),
 };
 
 const KcdTags = enum { Bus, Message, Signal };
@@ -146,6 +146,7 @@ pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErro
     const tag = if (getTag(next_element)) |t| t else {
         return null;
     };
+    std.log.debug("Found tag {}", .{tag});
     switch (tag) {
         .Bus => {
             return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
@@ -156,9 +157,21 @@ pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErro
             definition.id = try getAttributeAs(u32, "id", next_element);
             definition.length = getAttributeAs(usize, "length", next_element) catch 1;
             definition.interval = getAttributeAs(f64, "interval", next_element) catch null;
+            definition.head = null;
             return KcdElement{ .Message = definition };
         },
-        else => return null,
+        .Signal => {
+            const signal_struct = CanSignal{
+                .position = try getAttributeAs(usize, "offset", next_element),
+                .length = try getAttributeAs(usize, "length", next_element),
+                // TODO: scale and offset
+                .name = try getAttributeAs([]const u8, "name", next_element),
+            };
+            const definition = allocator.create(SignalDefinition) catch unreachable;
+            definition.structure = signal_struct;
+            definition.next = null;
+            return KcdElement{ .Signal = definition };
+        },
     }
 }
 
@@ -170,19 +183,48 @@ fn processBusElement(bus: *Element, allocator: Allocator, database: *ArrayList(*
             .element => |e| e,
             else => continue,
         };
+        std.log.debug("Processing {s}", .{element.tag});
         const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
-
+        // std.log.debug("Processing {any}", .{kcd_info.Signal});
         switch (kcd_info) {
             .Message => |m| {
                 current_message = m;
                 database.append(m) catch unreachable;
+                std.log.debug("Found message {s}", .{m.name});
+                try processMessageElement(element, allocator, m);
             },
+            // TODO: remove, this is now handled by processMessageElement
             .Signal => |signal| {
+                std.log.debug("Found signal {s}", .{signal.structure.name});
+
                 if (current_message) |msg| {
                     msg.addSignal(signal);
                 } else {
                     return KcdParseErrors.SignalOutsideMessage;
                 }
+            },
+            else => {},
+        }
+    }
+}
+
+fn processMessageElement(msg_element: *Element, allocator: Allocator, msg: *MessageDefinition) KcdParseErrors!void {
+    var it = msg_element.iterator();
+    while (it.next()) |content| {
+        const element = switch (content.*) {
+            .element => |e| e,
+            else => continue,
+        };
+        std.log.debug("Processing {s}", .{element.tag});
+        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
+        // std.log.debug("Processing {any}", .{kcd_info.Signal});
+        switch (kcd_info) {
+            .Message => |m| {
+                std.debug.panic("Found nested message {s}", .{m.name});
+            },
+            .Signal => |signal| {
+                std.log.debug("Found signal {s}", .{signal.structure.name});
+                msg.addSignal(signal);
             },
             else => {},
         }
