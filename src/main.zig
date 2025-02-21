@@ -48,6 +48,14 @@ pub fn main() !void {
         const reader = file.reader();
         const buffer = try reader.readAllAlloc(allocator, 10_000_000);
         const database = try kcd.parseKcd(allocator, buffer);
-        std.log.debug("Database = {}\n", .{database});
+        for (database.items) |msg| {
+            // std.log.debug("msg = {}\n", .{msg.*});
+            std.debug.print("{s}\n", .{msg.name});
+            var it = msg.head;
+            while (it) |signal| {
+                it = signal.next;
+                std.debug.print("{s}\n", .{signal.structure.name});
+            }
+        }
     }
 }
