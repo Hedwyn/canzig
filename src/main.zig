@@ -2,6 +2,8 @@ const std = @import("std");
 const can = @import("socketcan.zig");
 const xml = @import("xml.zig");
 const kcd = @import("kcd.zig");
+const utils = @import("utils.zig");
+const Iterator = utils.Iterator;
 const easycli = @import("parser");
 const debugPrint = std.log.debug;
 
@@ -51,9 +53,8 @@ pub fn main() !void {
         for (database.items) |msg| {
             // std.log.debug("msg = {}\n", .{msg.*});
             std.debug.print("{s}\n", .{msg.name});
-            var it = msg.head;
-            while (it) |signal| {
-                it = signal.next;
+            var it = Iterator(kcd.SignalDefinition){ .head = msg.head };
+            while (it.next()) |signal| {
                 std.debug.print("{s}\n", .{signal.structure.name});
             }
         }

@@ -11,12 +11,12 @@ const CanSignal = signals.CanSignal;
 
 const assert = std.debug.assert;
 
-const SignalDefinition = struct {
+pub const SignalDefinition = struct {
     structure: CanSignal,
     next: ?*SignalDefinition = null,
 };
 
-const MessageDefinition = struct {
+pub const MessageDefinition = struct {
     name: []const u8,
     id: u32,
     interval: ?f64 = null,
