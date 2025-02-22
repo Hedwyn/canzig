@@ -5,6 +5,23 @@ const StrError = error{
     BufferTooSmall,
 };
 
+pub fn Iterator(T: type) type {
+    if (!@hasField(T, "next")) {
+        @compileError("Struct passed to `Iterator` must have a `next` field");
+    }
+    return struct {
+        head: ?*T,
+        const Self = @This();
+
+        pub fn next(self: *Self) ?*T {
+            if (self.head) |head| {
+                self.head = head.next;
+            }
+            return self.head;
+        }
+    };
+}
+
 /// Copies the characters from `input` to `output`
 /// Returns StrError if output is too small
 pub fn strcpy(input: []const u8, output: []u8) StrError!void {
