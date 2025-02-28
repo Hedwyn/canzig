@@ -23,6 +23,7 @@ const Arguments = struct {
 const Options = struct {
     interface: []const u8 = default_can_if,
     db_path: ?[]const u8 = null,
+    payload: []const u8 = "",
 };
 
 const options_doc = [_]easycli.OptionInfo{
@@ -79,6 +80,9 @@ pub fn main() !void {
                 return;
             };
             try showDatabaseContent(db_path);
+        },
+        .encode => {
+            std.debug.print("Payload {s}\n", .{params.options.payload});
         },
         else => {},
     }

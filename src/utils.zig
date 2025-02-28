@@ -22,6 +22,28 @@ pub fn Iterator(T: type) type {
     };
 }
 
+pub fn findElementByField(comptime T: type, comptime field_type: type, array: []const T, comptime field: []const u8, value: field_type) ?T {
+    const is_slice = switch (@typeInfo(field_type)) {
+        .Pointer => |p| switch (p.size) {
+            .Slice => true,
+            else => false,
+        },
+        else => false,
+    };
+    for (array) |elem| {
+        if (is_slice) {
+            if (std.mem.eql(field_type, @field(elem, field), value)) {
+                return elem;
+            }
+        } else {
+            if (@field(elem, field) == value) {
+                return elem;
+            }
+        }
+    }
+    return null;
+}
+
 /// Copies the characters from `input` to `output`
 /// Returns StrError if output is too small
 pub fn strcpy(input: []const u8, output: []u8) StrError!void {
@@ -41,4 +63,14 @@ test "strcpy" {
     for (0..input.len) |i| {
         try std.testing.expectEqual(input[i], output[i]);
     }
+}
+
+test "find element by name" {
+    const Person = struct { name: []const u8, age: i32 };
+    const array = [_]Person{
+        .{ .name = "bob", .age = 42 },
+        .{ .name = "jack", .age = 60 },
+    };
+    const elem = findElementByField(Person, []const u8, &array, "name", "bob");
+    _ = elem;
 }
