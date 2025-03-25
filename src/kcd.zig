@@ -86,7 +86,7 @@ pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element:
     for (element.attributes) |attr| {
         if (std.mem.eql(u8, attr.name, attr_name)) {
             switch (@typeInfo(T)) {
-                .Int => {
+                .int => {
                     var val = attr.value;
                     const is_hex = val.len >= 2 and val[0] == '0' and (val[1] == 'x' or val[1] == 'X');
                     const base: u8 = if (is_hex) 16 else 10;
@@ -95,7 +95,7 @@ pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element:
                         return KcdParseErrors.InvalidIntegerValue;
                     };
                 },
-                .Float => {
+                .float => {
                     return fmt.parseFloat(T, attr.value) catch {
                         return KcdParseErrors.InvalidFloatValue;
                     };
@@ -114,12 +114,12 @@ pub fn getAttribute(comptime attr_name: []const u8, element: *Element, container
     for (element.attributes) |attr| {
         if (std.mem.eql(u8, attr.name, attr_name)) {
             switch (@typeInfo(T)) {
-                .Int => {
+                .int => {
                     @field(container, attr_name) = fmt.parseInt(T, attr.value, 10) catch {
                         return KcdParseErrors.InvalidIntegerValue;
                     };
                 },
-                .Float => {
+                .float => {
                     @field(container, attr_name) = fmt.parseFloat(T, attr.value) catch {
                         return KcdParseErrors.InvalidFloatValue;
                     };
