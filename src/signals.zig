@@ -121,7 +121,7 @@ pub fn CanFrame(
 
         /// Builds a struct type out of the message definition
         pub fn buildContainer() type {
-            var final_fields: [signals.len]Type.StructField = undefined;
+            var final_fields: [signals.len + 1]Type.StructField = undefined;
             inline for (0.., signals) |i, signal| {
                 const field_type = signal.getType();
                 final_fields[i] = Type.StructField{
@@ -132,6 +132,13 @@ pub fn CanFrame(
                     .is_comptime = false,
                 };
             }
+            final_fields[signals.len] = Type.StructField{
+                .name = "frame",
+                .type = type,
+                .alignment = @alignOf(type),
+                .default_value_ptr = &Self,
+                .is_comptime = true,
+            };
 
             return @Type(.{
                 .@"struct" = .{
@@ -163,6 +170,13 @@ pub fn CanFrame(
             }
         }
 
+        pub fn decodeNew(data: u64, comptime T: type) StructErrors!T {
+            // const bitsize = _size * 8;
+            var container: T = undefined;
+            try decode(data, &container);
+            return container;
+        }
+
         pub fn encode(container: anytype) StructErrors!u64 {
             var data: u64 = 0;
 
@@ -192,6 +206,7 @@ pub fn CanFrame(
 pub fn AnyMessage(comptime frames: []const type) type {
     var union_fields: [frames.len]Type.UnionField = undefined;
     var tag_fields: [frames.len]Type.EnumField = undefined;
+    @setEvalBranchQuota(10_000);
 
     inline for (0.., frames) |i, frame| {
         union_fields[i].name = @ptrCast(frame.name);
@@ -205,7 +220,7 @@ pub fn AnyMessage(comptime frames: []const type) type {
         .decls = &.{},
         .fields = &tag_fields,
         .is_exhaustive = true,
-        .tag_type = u8,
+        .tag_type = u16,
     };
     const tag_type = @Type(.{ .@"enum" = _tag });
     const _union = Type.Union{
@@ -219,6 +234,28 @@ pub fn AnyMessage(comptime frames: []const type) type {
     });
 }
 
+pub fn Database(db_name: []const u8, comptime frames: []const type) type {
+    return struct {
+        const name = db_name;
+        const Message = AnyMessage(frames);
+
+        pub fn decode(can_id: u32, data: u64) StructErrors!Message {
+            inline for (frames) |frame| {
+                if (frame.id == can_id) {
+                    return @unionInit(
+                        Message,
+                        frame.name,
+                        try frame.decodeNew(
+                            data,
+                            frame.Container,
+                        ),
+                    );
+                }
+            }
+            @panic("No decoder found !");
+        }
+    };
+}
 test "init signal" {
     const signal = CanSignal{
         .length = 8,
@@ -342,8 +379,8 @@ test "any message" {
     }};
     const MyMessage = CanFrame("msg1", 0, @constCast(&signal_array));
     const MessageList = &.{MyMessage};
-    const Database = AnyMessage(MessageList);
-    const db_msg = Database{ .msg1 = .{ .test_signal = 42 } };
+    const any_msg = AnyMessage(MessageList);
+    const db_msg = any_msg{ .msg1 = .{ .test_signal = 42 } };
     try std.testing.expectEqual(42, db_msg.msg1.test_signal);
 }
 
@@ -410,4 +447,39 @@ test "decode float message" {
         10.0,
         container.test_signal,
     );
+}
+
+test "database decoder single msg" {
+    const signal_array: [1]CanSignal = comptime .{.{
+        .length = 8,
+        .position = 0,
+        .name = "test_signal",
+    }};
+    const MyMessage = CanFrame("msg1", 123456, @constCast(&signal_array));
+    const MessageList = &.{MyMessage};
+    const TestDatabase = Database("TestDb", MessageList);
+    const decoded = try TestDatabase.decode(123456, 42);
+    try std.testing.expectEqual(42, decoded.msg1.test_signal);
+}
+
+test "database decoder many msg" {
+    const signal_array: [1]CanSignal = comptime .{.{
+        .length = 8,
+        .position = 0,
+        .name = "test_signal",
+    }};
+    const N = 1000;
+    comptime var _MessageList: [N]type = undefined;
+
+    inline for (0.._MessageList.len) |i| {
+        _MessageList[i] = CanFrame(
+            std.fmt.comptimePrint("msg{d}", .{i}),
+            i,
+            @constCast(&signal_array),
+        );
+    }
+    const MessageList = _MessageList;
+    const TestDatabase = Database("TestDb", MessageList[0..N]);
+    const decoded = try TestDatabase.decode(123, 42);
+    try std.testing.expectEqual(42, decoded.msg123.test_signal);
 }
