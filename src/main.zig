@@ -21,7 +21,7 @@ const Arguments = struct {
 };
 
 const Options = struct {
-    interface: []const u8 = default_can_if,
+    interface: ?[]const u8 = null,
     db_path: ?[]const u8 = null,
     payload: []const u8 = "",
 };
@@ -57,9 +57,8 @@ pub fn main() !void {
         .args = Arguments,
     });
     const params = if (try ParserT.runStandalone()) |p| p else return;
-    const can_if = params.options.interface;
+    const can_if = params.options.interface orelse default_can_if;
 
-    std.debug.print("Can if is {s}\n", .{params.options.interface});
     const fd = try can.openSocketCan(can_if);
     defer can.closeSocketCan(fd);
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
