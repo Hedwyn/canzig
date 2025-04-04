@@ -58,6 +58,13 @@ pub const Element = struct {
         };
     }
 
+    pub fn tagged_elements(self: Element, tag: []const u8) ChildTaggedElementIterator {
+        return .{
+            .inner = self.elements(),
+            .tag = tag,
+        };
+    }
+
     pub fn findChildByTag(self: Element, tag: []const u8) ?*Element {
         var it = self.findChildrenByTag(tag);
         return it.next();
@@ -94,6 +101,22 @@ pub const Element = struct {
                 }
 
                 return child.*.element;
+            }
+
+            return null;
+        }
+    };
+
+    pub const ChildTaggedElementIterator = struct {
+        inner: ChildElementIterator,
+        tag: []const u8,
+
+        pub fn next(self: *ChildTaggedElementIterator) ?*Element {
+            while (self.inner.next()) |child| {
+                if (!std.mem.eql(u8, child.tag, self.tag)) {
+                    continue;
+                }
+                return child;
             }
 
             return null;
