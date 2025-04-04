@@ -35,11 +35,31 @@ pub fn showDatabaseContent(db_path: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+
+    const json_output = try std.fs.cwd().createFile(
+        "output.json",
+        .{ .read = true },
+    );
+    const json_writer = json_output.writer();
+    defer json_output.close();
+
+    const database = try kcd.KcdDatabase.parseFile(db_path, allocator);
+
+    const serializable_db = try database.serialize(allocator);
+
+    try std.json.stringify(serializable_db.items, .{ .whitespace = .indent_4 }, json_writer);
+    std.debug.print("Output exported to output.json\n", .{});
+}
+
+pub fn exportDatabaseToJson(db_path: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const file = try std.fs.cwd().openFile(db_path, .{});
 
     const reader = file.reader();
     const buffer = try reader.readAllAlloc(allocator, 10_000_000);
-    const database = try kcd.parseKcd(allocator, buffer);
+    const database = try kcd.KcdParser(allocator, buffer);
     for (database.items) |msg| {
         // std.log.debug("msg = {}\n", .{msg.*});
         std.debug.print("{s}\n", .{msg.name});
@@ -85,6 +105,4 @@ pub fn main() !void {
         },
         else => {},
     }
-
-    std.debug.print("path!{any} \n", .{params.options.db_path});
 }

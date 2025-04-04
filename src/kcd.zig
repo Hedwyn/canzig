@@ -16,73 +16,34 @@ pub const SignalDefinition = struct {
     next: ?*SignalDefinition = null,
 };
 
-pub const MessageDefinition = struct {
-    name: []const u8,
-    id: u32,
-    interval: ?f64 = null,
-    length: usize,
-    head: ?*SignalDefinition = null,
-
-    pub fn addSignal(self: *MessageDefinition, signal: *SignalDefinition) void {
-        const tail = if (self.head) |head| head else {
-            self.head = signal;
-            return;
-        };
-        var prev = tail;
-        var next = tail.next;
-        // finding the last slot
-        while (next) |node| {
-            prev = node;
-            next = node.next;
-        }
-        prev.next = signal;
-        std.log.debug("Added signal {s} to {s}", .{
-            self.name,
-            signal.structure.name,
-        });
-    }
-};
-
-const KcdTags = enum { Bus, Message, Signal };
-
-const KcdElement = union(KcdTags) {
-    Bus: []const u8,
-    Message: *MessageDefinition,
-    Signal: *SignalDefinition,
-
-    pub fn free(self: *KcdElement, allocator: Allocator) void {
-        switch (self.*) {
-            .Message => |p| allocator.destroy(p),
-            .Signal => |p| allocator.destroy(p),
-            else => {},
-        }
-    }
-};
-
 const KcdParseErrors = error{
+    // Bus errors
+    NoBus,
+    MultipleBuses,
     MissingMessageName,
     AttributeMissing,
     InvalidFloatValue,
     InvalidIntegerValue,
     SignalOutsideMessage,
+    AllocatorError,
+    MissingSignalProperties,
+    EmptyDatabase,
+    InvalidXml,
+    FileTooBig,
 };
 
-pub fn getTag(element: *Element) ?KcdTags {
-    inline for (std.meta.fields(KcdTags)) |field| {
-        if (std.mem.eql(u8, element.tag, field.name)) {
-            return @enumFromInt(field.value);
-        }
-    }
-    return null;
-}
+const kcd_max_size = 16_000_000;
 
-pub fn parseKcd(allocator: Allocator, xml_content: []u8) !ArrayList(*MessageDefinition) {
-    const document = try xml.parse(allocator, xml_content);
-    defer document.deinit();
-    return try processXmlElements(document.root, allocator);
-}
+pub const SerializableMessage = struct {
+    name: []const u8,
+    id: u32,
+    interval: ?f64 = null,
+    length: usize,
+    signals: []const CanSignal = &.{},
+    doc: ?[]const u8 = null,
+};
 
-pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element: *Element) KcdParseErrors!T {
+pub fn getAttributeAsMaybe(comptime T: type, comptime attr_name: []const u8, element: *Element) KcdParseErrors!?T {
     for (element.attributes) |attr| {
         if (std.mem.eql(u8, attr.name, attr_name)) {
             switch (@typeInfo(T)) {
@@ -106,7 +67,15 @@ pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element:
             }
         }
     }
-    return KcdParseErrors.AttributeMissing;
+    return null;
+}
+
+pub fn getAttributeAsDefaulted(comptime T: type, comptime attr_name: []const u8, element: *Element, fallback: T) KcdParseErrors!T {
+    return try getAttributeAsMaybe(T, attr_name, element) orelse fallback;
+}
+
+pub fn getAttributeAs(comptime T: type, comptime attr_name: []const u8, element: *Element) KcdParseErrors!T {
+    return try getAttributeAsMaybe(T, attr_name, element) orelse KcdParseErrors.AttributeMissing;
 }
 
 pub fn getAttribute(comptime attr_name: []const u8, element: *Element, container: anytype) KcdParseErrors!void {
@@ -142,288 +111,152 @@ pub fn buildContainerFromElement(comptime T: type, element: *Element) KcdParseEr
     return container;
 }
 
-pub fn extractKcdInfo(next_element: *Element, allocator: Allocator) KcdParseErrors!?KcdElement {
-    const tag = if (getTag(next_element)) |t| t else {
-        return null;
+const SignalData = struct {
+    notes: ?[]const u8 = null,
+    scale: f64 = 1.0,
+    offset: f64 = 0.0,
+};
+
+pub const KcdDatabase = struct {
+    document: xml.Document,
+    allocator: Allocator,
+    signals: ArrayList(CanSignal),
+    messages: ArrayList(MessageDefinition),
+
+    const MessageDefinition = struct {
+        name: []const u8,
+        id: u32,
+        interval: ?f64 = null,
+        length: usize,
+        signals_start_idx: usize,
+        signals_end_idx: usize,
     };
-    std.log.debug("Found tag {}", .{tag});
-    switch (tag) {
-        .Bus => {
-            return KcdElement{ .Bus = try getAttributeAs([]const u8, "name", next_element) };
-        },
-        .Message => {
-            var definition = allocator.create(MessageDefinition) catch unreachable;
-            definition.name = try getAttributeAs([]const u8, "name", next_element);
-            definition.id = try getAttributeAs(u32, "id", next_element);
-            definition.length = getAttributeAs(usize, "length", next_element) catch 1;
-            definition.interval = getAttributeAs(f64, "interval", next_element) catch null;
-            definition.head = null;
-            return KcdElement{ .Message = definition };
-        },
-        .Signal => {
-            const signal_struct = CanSignal{
-                .position = try getAttributeAs(usize, "offset", next_element),
-                .length = try getAttributeAs(usize, "length", next_element),
-                // TODO: scale and offset
-                .name = try getAttributeAs([]const u8, "name", next_element),
-            };
-            const definition = allocator.create(SignalDefinition) catch unreachable;
-            definition.structure = signal_struct;
-            definition.next = null;
-            return KcdElement{ .Signal = definition };
-        },
+
+    pub fn serialize(self: KcdDatabase, allocator: Allocator) !ArrayList(SerializableMessage) {
+        var messages = ArrayList(SerializableMessage).init(allocator);
+        for (self.messages.items) |msg| {
+            try messages.append(self.serializeMessage(msg));
+        }
+        return messages;
     }
-}
 
-fn processBusElement(bus: *Element, allocator: Allocator, database: *ArrayList(*MessageDefinition)) KcdParseErrors!void {
-    var it = bus.iterator();
-    var current_message: ?*MessageDefinition = null;
-    while (it.next()) |content| {
-        const element = switch (content.*) {
-            .element => |e| e,
-            else => continue,
+    pub fn serializeMessage(self: KcdDatabase, msg: MessageDefinition) SerializableMessage {
+        const signals_slice = self.signals.items[msg.signals_start_idx..msg.signals_end_idx];
+        return .{
+            .name = msg.name,
+            .id = msg.id,
+            .length = msg.length,
+            .interval = msg.interval,
+            .signals = signals_slice,
         };
-        std.log.debug("Processing {s}", .{element.tag});
-        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
-        // std.log.debug("Processing {any}", .{kcd_info.Signal});
-        switch (kcd_info) {
-            .Message => |m| {
-                current_message = m;
-                database.append(m) catch unreachable;
-                std.log.debug("Found message {s}", .{m.name});
-                try processMessageElement(element, allocator, m);
-            },
-            // TODO: remove, this is now handled by processMessageElement
-            .Signal => |signal| {
-                std.log.debug("Found signal {s}", .{signal.structure.name});
+    }
 
-                if (current_message) |msg| {
-                    msg.addSignal(signal);
-                } else {
-                    return KcdParseErrors.SignalOutsideMessage;
+    const CursorIterator = struct {
+        parser: *KcdDatabase,
+        inner: xml.Element.ChildElementIterator,
+        expected_tag: ?[]const u8 = null,
+
+        pub fn next(self: CursorIterator) ?Element {
+            while (self.inner.next()) |elem| {
+                if (self.expected_tag) |tag| {
+                    if (!std.mem.eql(u8, tag, elem.tag)) {
+                        continue;
+                    }
                 }
-            },
-            else => {},
+                self.parser.current_element = elem;
+                return elem;
+            }
+            return null;
         }
-    }
-}
+    };
 
-fn processMessageElement(msg_element: *Element, allocator: Allocator, msg: *MessageDefinition) KcdParseErrors!void {
-    var it = msg_element.iterator();
-    while (it.next()) |content| {
-        const element = switch (content.*) {
-            .element => |e| e,
-            else => continue,
+    /// Moves the internal cursor to the next bus element
+    fn getNextElement(current: *const Element, tag: []const u8) ?*Element {
+        var it = current.tagged_elements(tag);
+        return it.next();
+    }
+
+    pub fn deinit(self: *KcdDatabase) !void {
+        self.document.deinit();
+        self.messages.deinit();
+        self.signals.deinit();
+    }
+
+    // Constructors
+
+    pub fn parseXml(document: xml.Document, allocator: Allocator) !KcdDatabase {
+        var db = KcdDatabase{
+            .document = document,
+            .allocator = allocator,
+            .signals = .init(allocator),
+            .messages = .init(allocator),
         };
-        std.log.debug("Processing {s}", .{element.tag});
-        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
-        // std.log.debug("Processing {any}", .{kcd_info.Signal});
-        switch (kcd_info) {
-            .Message => |m| {
-                std.debug.panic("Found nested message {s}", .{m.name});
-            },
-            .Signal => |signal| {
-                std.log.debug("Found signal {s}", .{signal.structure.name});
-                msg.addSignal(signal);
-            },
-            else => {},
+        try db.inner_parse();
+        return db;
+    }
+
+    pub fn parseString(xml_content: []const u8, allocator: Allocator) !KcdDatabase {
+        const document = xml.parse(allocator, xml_content) catch return KcdParseErrors.InvalidXml;
+        return KcdDatabase.parseXml(document, allocator);
+    }
+
+    pub fn parseFile(fpath: []const u8, allocator: Allocator) !KcdDatabase {
+        const file = try std.fs.cwd().openFile(fpath, .{});
+
+        const reader = file.reader();
+        const buffer = reader.readAllAlloc(allocator, kcd_max_size) catch return KcdParseErrors.AllocatorError;
+        defer allocator.free(buffer);
+        return KcdDatabase.parseString(buffer, allocator);
+    }
+
+    fn inner_parse(self: *KcdDatabase) KcdParseErrors!void {
+        const bus_element = getNextElement(self.document.root, "Bus") orelse return KcdParseErrors.EmptyDatabase;
+        try self.parseMessages(bus_element);
+    }
+
+    pub fn parseMessages(self: *KcdDatabase, bus_element: *xml.Element) KcdParseErrors!void {
+        var msg_it = bus_element.tagged_elements("Message");
+        while (msg_it.next()) |msg| {
+            try self.parseMessage(msg);
         }
     }
-}
 
-pub fn processXmlElements(root: *Element, allocator: Allocator) KcdParseErrors!ArrayList(*MessageDefinition) {
-    var database = ArrayList(*MessageDefinition).init(allocator);
-    var it = root.iterator();
-    while (it.next()) |content| {
-        const element = switch (content.*) {
-            .element => |e| e,
-            else => continue,
+    pub fn parseMessage(self: *KcdDatabase, msg_element: *Element) KcdParseErrors!void {
+        var signal_it = msg_element.tagged_elements("Signal");
+        const signals_start_idx = self.signals.items.len;
+        while (signal_it.next()) |signal_element| {
+            try self.parseSignal(signal_element);
+        }
+        const signals_end_idx = self.signals.items.len;
+        const new_msg = MessageDefinition{
+            .name = try getAttributeAs([]const u8, "name", msg_element),
+            .id = try getAttributeAs(u32, "id", msg_element),
+            .length = getAttributeAs(usize, "length", msg_element) catch 8,
+            .interval = getAttributeAs(f64, "interval", msg_element) catch null,
+            .signals_start_idx = signals_start_idx,
+            .signals_end_idx = signals_end_idx,
         };
-        const kcd_info = (try extractKcdInfo(element, allocator)) orelse continue;
-
-        switch (kcd_info) {
-            .Bus => |name| {
-                std.log.info("Parsing bus {s}\n", .{name});
-                try processBusElement(element, allocator, &database);
-            },
-            else => {},
-        }
+        self.messages.append(new_msg) catch return KcdParseErrors.AllocatorError;
     }
-    return database;
-}
 
-test "get attribute str" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "some_attr", .value = "3.14" },
-        .{ .name = "useless", .value = "42" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
+    pub fn parseSignal(self: *KcdDatabase, signal_element: *Element) KcdParseErrors!void {
+        const maybe_value = getNextElement(signal_element, "value");
+        const scale = if (maybe_value) |v| try getAttributeAsDefaulted(f64, "slope", v, 1.0) else 1.0;
+        const offset = if (maybe_value) |v| try getAttributeAsDefaulted(f64, "intercept", v, 0.0) else 0.0;
 
-    const ContainerType = struct {
-        some_attr: []const u8,
-    };
-    var container: ContainerType = undefined;
-    try getAttribute("some_attr", &test_element, &container);
-    // try std.testing.expectEqualStrings("3.14", container.some_attr);
-    try std.testing.expectEqual("3.14", container.some_attr);
-}
-
-test "get attribute float" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "some_attr", .value = "3.14" },
-        .{ .name = "useless", .value = "42" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-
-    const ContainerType = struct {
-        some_attr: f64,
-    };
-    var container: ContainerType = undefined;
-    try getAttribute("some_attr", &test_element, &container);
-    try std.testing.expectEqual(3.14, container.some_attr);
-}
-
-test "get attribute int" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "some_attr", .value = "42" },
-        .{ .name = "useless", .value = "3.14" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-
-    const ContainerType = struct {
-        some_attr: i32,
-    };
-    var container: ContainerType = undefined;
-    try getAttribute("some_attr", &test_element, &container);
-    // try std.testing.expectEqualStrings("3.14", container.some_attr);
-    try std.testing.expectEqual(42, container.some_attr);
-}
-
-test "get attribute not found" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "some_attr", .value = "42" },
-        .{ .name = "useless", .value = "3.14" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-
-    const ContainerType = struct {
-        does_not_exit: i32,
-    };
-    var container: ContainerType = undefined;
-    try std.testing.expectEqual(KcdParseErrors.AttributeMissing, getAttribute("does_not_exit", &test_element, &container));
-}
-
-test "get attribute numeric parse errors" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "some_attr", .value = "42s" },
-        .{ .name = "other_attr", .value = "3.1z4" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-
-    const ContainerType = struct {
-        some_attr: i32,
-        other_attr: f64,
-    };
-    var container: ContainerType = undefined;
-    try std.testing.expectEqual(KcdParseErrors.InvalidIntegerValue, getAttribute("some_attr", &test_element, &container));
-    try std.testing.expectEqual(KcdParseErrors.InvalidFloatValue, getAttribute("other_attr", &test_element, &container));
-}
-
-test "build container from attributes" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "an_attr", .value = "3.14" },
-        .{ .name = "another_attr", .value = "42" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-
-    const ContainerType = struct {
-        an_attr: f64,
-        another_attr: i32,
-    };
-    const container = try buildContainerFromElement(ContainerType, &test_element);
-    _ = container;
-}
-
-test "get attribute as" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "an_attr", .value = "3.14" },
-        .{ .name = "another_attr", .value = "42" },
-    };
-    var test_element: Element = .{
-        .tag = "Test",
-        .attributes = &attributes,
-    };
-    const value = getAttributeAs(f64, "an_attr", &test_element);
-    try std.testing.expectEqual(3.14, value);
-}
-
-test "get tag" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "name", .value = "TestBus" },
-    };
-    var test_element: Element = .{
-        .tag = "Bus",
-        .attributes = &attributes,
-    };
-
-    try std.testing.expectEqual(getTag(&test_element).?, KcdTags.Bus);
-}
-
-test "test fsm get info" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "name", .value = "TestBus" },
-    };
-    var test_element: Element = .{
-        .tag = "Bus",
-        .attributes = &attributes,
-    };
-    const allocator = std.heap.page_allocator;
-    var kcd_info = try extractKcdInfo(&test_element, allocator) orelse unreachable;
-    defer kcd_info.free(allocator);
-    try std.testing.expect(std.meta.eql(KcdElement{ .Bus = "TestBus" }, kcd_info));
-}
-
-test "test process elements" {
-    var attributes = [_]xml.Attribute{
-        .{ .name = "name", .value = "TestBus" },
-    };
-    var test_element: Element = .{
-        .tag = "Bus",
-        .attributes = &attributes,
-    };
-    var content = [_]Content{.{ .element = &test_element }};
-    var root = Element{
-        .tag = "root",
-        .children = &content,
-    };
-    const allocator = std.heap.page_allocator;
-
-    const database = try processXmlElements(&root, allocator);
-
-    for (database.items) |msg| {
-        std.log.debug("Msg = {any}", .{msg.*});
+        const signal_struct = CanSignal{
+            .position = try getAttributeAs(usize, "offset", signal_element),
+            .length = try getAttributeAsDefaulted(usize, "length", signal_element, 1),
+            // TODO: scale and offset
+            .name = try getAttributeAs([]const u8, "name", signal_element),
+            .offset = offset,
+            .scale = scale,
+        };
+        self.signals.append(signal_struct) catch return KcdParseErrors.AllocatorError;
     }
-}
+};
 
-test "parse kcd" {
+test "parse string" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -431,6 +264,14 @@ test "parse kcd" {
 
     const reader = file.reader();
     const buffer = try reader.readAllAlloc(allocator, 10_000_000);
-    const database = try parseKcd(allocator, buffer);
+    const database = try KcdDatabase.parseString(buffer, allocator);
+    std.log.debug("Database = {}\n", .{database});
+}
+
+test "parse file" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const allocator = arena.allocator();
+    defer arena.deinit();
+    const database = try KcdDatabase.parseFile("can_definition_sample.kcd", allocator);
     std.log.debug("Database = {}\n", .{database});
 }
