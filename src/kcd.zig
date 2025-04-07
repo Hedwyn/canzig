@@ -240,7 +240,7 @@ pub const KcdDatabase = struct {
     }
 
     pub fn parseSignal(self: *KcdDatabase, signal_element: *Element) KcdParseErrors!void {
-        const maybe_value = getNextElement(signal_element, "value");
+        const maybe_value = getNextElement(signal_element, "Value");
         const scale = if (maybe_value) |v| try getAttributeAsDefaulted(f64, "slope", v, 1.0) else 1.0;
         const offset = if (maybe_value) |v| try getAttributeAsDefaulted(f64, "intercept", v, 0.0) else 0.0;
 
