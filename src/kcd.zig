@@ -8,6 +8,7 @@ const Content = xml.Content;
 const fmt = std.fmt;
 
 const CanSignal = signals.CanSignal;
+const CanFrame = signals.CanFrame;
 
 const assert = std.debug.assert;
 
@@ -132,6 +133,22 @@ pub const KcdDatabase = struct {
         signals_end_idx: usize,
     };
 
+    /// For a comptime database,
+    /// returns the slice of messages as CanFrame() objects
+    pub fn getFrames(comptime self: KcdDatabase) []type {
+        comptime {
+            var frames: [self.messages.len]type = undefined;
+            for (0.., self.messages.items) |i, msg| {
+                frames[i] = CanFrame(
+                    msg.name,
+                    msg.id,
+                    self.signals.items[msg.signal_start_idx..msg.signals_end_idx],
+                );
+            }
+            return &frames;
+        }
+    }
+
     pub fn serialize(self: KcdDatabase, allocator: Allocator) !ArrayList(SerializableMessage) {
         var messages = ArrayList(SerializableMessage).init(allocator);
         for (self.messages.items) |msg| {
@@ -150,25 +167,6 @@ pub const KcdDatabase = struct {
             .signals = signals_slice,
         };
     }
-
-    const CursorIterator = struct {
-        parser: *KcdDatabase,
-        inner: xml.Element.ChildElementIterator,
-        expected_tag: ?[]const u8 = null,
-
-        pub fn next(self: CursorIterator) ?Element {
-            while (self.inner.next()) |elem| {
-                if (self.expected_tag) |tag| {
-                    if (!std.mem.eql(u8, tag, elem.tag)) {
-                        continue;
-                    }
-                }
-                self.parser.current_element = elem;
-                return elem;
-            }
-            return null;
-        }
-    };
 
     /// Moves the internal cursor to the next bus element
     fn getNextElement(current: *const Element, tag: []const u8) ?*Element {
@@ -207,6 +205,14 @@ pub const KcdDatabase = struct {
         const buffer = reader.readAllAlloc(allocator, kcd_max_size) catch return KcdParseErrors.AllocatorError;
         defer allocator.free(buffer);
         return KcdDatabase.parseString(buffer, allocator);
+    }
+
+    /// A parser that takes care of memory allocation
+    /// Use this if you don't care about the allocation strategy used
+    pub fn parseComptime(comptime fpath: []const u8) !KcdDatabase {
+        const file_content = @embedFile(fpath);
+        const allocator = std.heap.page_allocator;
+        return KcdDatabase.parseString(file_content, allocator);
     }
 
     fn inner_parse(self: *KcdDatabase) KcdParseErrors!void {
@@ -274,4 +280,14 @@ test "parse file" {
     defer arena.deinit();
     const database = try KcdDatabase.parseFile("can_definition_sample.kcd", allocator);
     std.log.debug("Database = {}\n", .{database});
+}
+
+test "parse standalone" {
+    const database = comptime try KcdDatabase.parseComptime("test_files/can_definition_sample.kcd");
+    std.log.debug("Database = {}\n", .{database});
+}
+
+test "get frames" {
+    const database = comptime try KcdDatabase.parseStandalone("can_definition_sample.kcd");
+    std.log.debug("Database = {}\n", .{database.getFrames()});
 }

@@ -39,9 +39,64 @@ pub const PseudoAllocator = struct {
 /// A list-like object that unlile std.ArrayList works at both runtime and comptime
 pub fn GenericList(T: type) type {
     return struct {
-        runtime: std.ArrayList(T),
+        runtime: ?std.ArrayList(T) = null,
+        allocator: PseudoAllocator,
         comptime list: []T = &.{},
+        const Self = @This();
+        const Slice = std.ArrayList(T).Slice;
+
+        pub fn init(allocator: PseudoAllocator) Self {
+            if (@inComptime()) {
+                return .{ .allocator = allocator };
+            }
+            return .{
+                .runtime = std.ArrayList(T).init(allocator.assert_allocator()),
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: Self) void {
+            if (!@inComptime()) {
+                const runtime = self.runtime_inner();
+                runtime.deinit();
+            }
+        }
+
+        pub fn runtime_inner_mut(self: *Self) *std.ArrayList(T) {
+            return @constCast(&(self.runtime orelse @panic("Comptime-only")));
+        }
+
+        pub fn runtime_inner(self: Self) std.ArrayList(T) {
+            return self.runtime orelse @panic("Comptime-only");
+        }
+
+        pub fn append(self: *Self, item: T) !void {
+            if (@inComptime()) {
+                @panic("Not implemented");
+            }
+            try self.runtime_inner_mut().append(item);
+            // std.debug.print("Appending {}: {}\n", .{ item, self.runtime.?.items.len });
+        }
+        pub fn toOwnedSlice(self: *Self) Allocator.Error!Slice {
+            if (@inComptime()) {
+                @panic("Not implemented");
+            }
+            var runtime = self.runtime_inner_mut();
+            return try runtime.toOwnedSlice();
+        }
     };
+}
+
+test "generic list" {
+    const alloc: PseudoAllocator = .{ .allocator = std.testing.allocator };
+    var normal_list = std.ArrayList(u32).init(alloc.assert_allocator());
+
+    var list = GenericList(u32).init(alloc);
+    defer list.deinit();
+    defer normal_list.deinit();
+    // std.debug.print("address of ArrayList: {*}", .{list.runtime.?});
+    try list.append(1);
+    try normal_list.append(1);
 }
 
 pub const Attribute = struct {
@@ -486,10 +541,10 @@ fn parseElement(parser: *Parser, alloc: PseudoAllocator, comptime kind: ElementK
         },
     };
 
-    var attributes = std.ArrayList(Attribute).init(alloc.allocator.?);
+    var attributes = GenericList(Attribute).init(alloc);
     defer attributes.deinit();
 
-    var children = std.ArrayList(Content).init(alloc.allocator.?);
+    var children = GenericList(Content).init(alloc);
     defer children.deinit();
 
     while (parser.eatWs()) {
