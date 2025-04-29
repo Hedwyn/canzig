@@ -7,6 +7,43 @@ const testing = std.testing;
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+pub const PseudoAllocator = struct {
+    allocator: ?Allocator = null,
+
+    pub fn assert_allocator(self: PseudoAllocator) Allocator {
+        return self.allocator orelse @panic("You must define an allocator for runtime allocation");
+    }
+
+    pub fn alloc(self: PseudoAllocator, comptime T: type, n: usize) ![]T {
+        if (@inComptime()) {
+            @panic("Not implemented");
+        }
+        return self.assert_allocator().alloc(T, n);
+    }
+
+    pub fn create(self: PseudoAllocator, comptime T: type) !*T {
+        if (@inComptime()) {
+            @panic("Not implemented");
+        }
+        return self.assert_allocator().create(T);
+    }
+
+    pub fn dupe(self: PseudoAllocator, comptime T: type, m: []const T) ![]T {
+        if (@inComptime()) {
+            @panic("Not implemented");
+        }
+        return self.assert_allocator().dupe(T, m);
+    }
+};
+
+/// A list-like object that unlile std.ArrayList works at both runtime and comptime
+pub fn GenericList(T: type) type {
+    return struct {
+        runtime: std.ArrayList(T),
+        comptime list: []T = &.{},
+    };
+}
+
 pub const Attribute = struct {
     name: []const u8,
     value: []const u8,
@@ -58,13 +95,6 @@ pub const Element = struct {
         };
     }
 
-    pub fn tagged_elements(self: Element, tag: []const u8) ChildTaggedElementIterator {
-        return .{
-            .inner = self.elements(),
-            .tag = tag,
-        };
-    }
-
     pub fn findChildByTag(self: Element, tag: []const u8) ?*Element {
         var it = self.findChildrenByTag(tag);
         return it.next();
@@ -107,22 +137,6 @@ pub const Element = struct {
         }
     };
 
-    pub const ChildTaggedElementIterator = struct {
-        inner: ChildElementIterator,
-        tag: []const u8,
-
-        pub fn next(self: *ChildTaggedElementIterator) ?*Element {
-            while (self.inner.next()) |child| {
-                if (!std.mem.eql(u8, child.tag, self.tag)) {
-                    continue;
-                }
-                return child;
-            }
-
-            return null;
-        }
-    };
-
     pub const FindChildrenByTagIterator = struct {
         inner: ChildElementIterator,
         tag: []const u8,
@@ -142,12 +156,18 @@ pub const Element = struct {
 };
 
 pub const Document = struct {
-    arena: ArenaAllocator,
+    arena: ?ArenaAllocator = null,
     xml_decl: ?*Element,
     root: *Element,
 
     pub fn deinit(self: Document) void {
-        var arena = self.arena; // Copy to stack so self can be taken by value.
+        if (@inComptime()) {
+            return;
+        }
+
+        var arena = self.arena orelse @panic(
+            "Runtime document has no arena defined, you may have a memory leak",
+        ); // Copy to stack so self can be taken by value.
         arena.deinit();
     }
 };
@@ -323,21 +343,22 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-pub fn parse(backing_allocator: Allocator, source: []const u8) !Document {
+pub fn parse(backing_allocator: ?Allocator, source: []const u8) !Document {
     var parser = Parser.init(source);
     return try parseDocument(&parser, backing_allocator);
 }
 
-fn parseDocument(parser: *Parser, backing_allocator: Allocator) !Document {
+fn parseDocument(parser: *Parser, backing_allocator: ?Allocator) !Document {
     var doc = Document{
-        .arena = ArenaAllocator.init(backing_allocator),
+        .arena = if (backing_allocator) |a| ArenaAllocator.init(a) else null,
         .xml_decl = null,
         .root = undefined,
     };
 
-    errdefer doc.deinit();
-
-    const allocator = doc.arena.allocator();
+    const inner_allocator = if (doc.arena) |_| doc.arena.?.allocator() else null;
+    const allocator = PseudoAllocator{
+        .allocator = inner_allocator,
+    };
 
     try skipComments(parser, allocator);
 
@@ -354,7 +375,7 @@ fn parseDocument(parser: *Parser, backing_allocator: Allocator) !Document {
     return doc;
 }
 
-fn parseAttrValue(parser: *Parser, alloc: Allocator) ![]const u8 {
+fn parseAttrValue(parser: *Parser, alloc: PseudoAllocator) ![]const u8 {
     const quote = try parser.consume();
     if (quote != '"' and quote != '\'') return error.UnexpectedCharacter;
 
@@ -370,7 +391,7 @@ fn parseAttrValue(parser: *Parser, alloc: Allocator) ![]const u8 {
     return try unescape(alloc, parser.source[begin..end]);
 }
 
-fn parseEqAttrValue(parser: *Parser, alloc: Allocator) ![]const u8 {
+fn parseEqAttrValue(parser: *Parser, alloc: PseudoAllocator) ![]const u8 {
     _ = parser.eatWs();
     try parser.expect('=');
     _ = parser.eatWs();
@@ -397,7 +418,7 @@ fn parseNameNoDupe(parser: *Parser) ![]const u8 {
     return parser.source[begin..end];
 }
 
-fn parseCharData(parser: *Parser, alloc: Allocator) !?[]const u8 {
+fn parseCharData(parser: *Parser, alloc: PseudoAllocator) !?[]const u8 {
     const begin = parser.offset;
 
     while (parser.peek()) |ch| {
@@ -413,7 +434,7 @@ fn parseCharData(parser: *Parser, alloc: Allocator) !?[]const u8 {
     return try unescape(alloc, parser.source[begin..end]);
 }
 
-fn parseContent(parser: *Parser, alloc: Allocator) ParseError!Content {
+fn parseContent(parser: *Parser, alloc: PseudoAllocator) ParseError!Content {
     if (try parseCharData(parser, alloc)) |cd| {
         return Content{ .char_data = cd };
     } else if (try parseComment(parser, alloc)) |comment| {
@@ -425,7 +446,7 @@ fn parseContent(parser: *Parser, alloc: Allocator) ParseError!Content {
     }
 }
 
-fn parseAttr(parser: *Parser, alloc: Allocator) !?Attribute {
+fn parseAttr(parser: *Parser, alloc: PseudoAllocator) !?Attribute {
     const name = parseNameNoDupe(parser) catch return null;
     _ = parser.eatWs();
     try parser.expect('=');
@@ -444,7 +465,7 @@ const ElementKind = enum {
     element,
 };
 
-fn parseElement(parser: *Parser, alloc: Allocator, comptime kind: ElementKind) !?*Element {
+fn parseElement(parser: *Parser, alloc: PseudoAllocator, comptime kind: ElementKind) !?*Element {
     const start = parser.offset;
 
     const tag = switch (kind) {
@@ -465,10 +486,10 @@ fn parseElement(parser: *Parser, alloc: Allocator, comptime kind: ElementKind) !
         },
     };
 
-    var attributes = std.ArrayList(Attribute).init(alloc);
+    var attributes = std.ArrayList(Attribute).init(alloc.allocator.?);
     defer attributes.deinit();
 
-    var children = std.ArrayList(Content).init(alloc);
+    var children = std.ArrayList(Content).init(alloc.allocator.?);
     defer children.deinit();
 
     while (parser.eatWs()) {
@@ -516,7 +537,7 @@ fn parseElement(parser: *Parser, alloc: Allocator, comptime kind: ElementKind) !
 test "xml: parseElement" {
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc: PseudoAllocator = .{ .allocator = arena.allocator() };
 
     {
         var parser = Parser.init("<= a='b'/>");
@@ -561,7 +582,7 @@ test "xml: parseElement" {
 test "xml: parse prolog" {
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
+    const a: PseudoAllocator = .{ .allocator = arena.allocator() };
 
     {
         var parser = Parser.init("<?xmla version='aa'?>");
@@ -586,13 +607,13 @@ test "xml: parse prolog" {
     }
 }
 
-fn skipComments(parser: *Parser, alloc: Allocator) !void {
+fn skipComments(parser: *Parser, alloc: PseudoAllocator) !void {
     while ((try parseComment(parser, alloc)) != null) {
         _ = parser.eatWs();
     }
 }
 
-fn parseComment(parser: *Parser, alloc: Allocator) !?[]const u8 {
+fn parseComment(parser: *Parser, alloc: PseudoAllocator) !?[]const u8 {
     if (!parser.eatStr("<!--")) return null;
 
     const begin = parser.offset;
@@ -622,7 +643,7 @@ fn unescapeEntity(text: []const u8) !u8 {
     return error.InvalidEntity;
 }
 
-fn unescape(arena: Allocator, text: []const u8) ![]const u8 {
+fn unescape(arena: PseudoAllocator, text: []const u8) ![]const u8 {
     const unescaped = try arena.alloc(u8, text.len);
 
     var j: usize = 0;
@@ -644,7 +665,7 @@ fn unescape(arena: Allocator, text: []const u8) ![]const u8 {
 test "xml: unescape" {
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
+    const a: PseudoAllocator = .{ .allocator = arena.allocator() };
 
     try testing.expectEqualSlices(u8, "test", try unescape(a, "test"));
     try testing.expectEqualSlices(u8, "a<b&c>d\"e'f<", try unescape(a, "a&lt;b&amp;c&gt;d&quot;e&apos;f&lt;"));
