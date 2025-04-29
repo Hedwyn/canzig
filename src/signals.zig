@@ -234,7 +234,7 @@ pub fn AnyMessage(comptime frames: []const type) type {
     });
 }
 
-pub fn Database(db_name: []const u8, comptime frames: []const type) type {
+pub fn Channel(db_name: []const u8, comptime frames: []const type) type {
     return struct {
         const name = db_name;
         const Message = AnyMessage(frames);
@@ -457,7 +457,7 @@ test "database decoder single msg" {
     }};
     const MyMessage = CanFrame("msg1", 123456, @constCast(&signal_array));
     const MessageList = &.{MyMessage};
-    const TestDatabase = Database("TestDb", MessageList);
+    const TestDatabase = Channel("TestDb", MessageList);
     const decoded = try TestDatabase.decode(123456, 42);
     try std.testing.expectEqual(42, decoded.msg1.test_signal);
 }
@@ -479,7 +479,7 @@ test "database decoder many msg" {
         );
     }
     const MessageList = _MessageList;
-    const TestDatabase = Database("TestDb", MessageList[0..N]);
+    const TestDatabase = Channel("TestDb", MessageList[0..N]);
     const decoded = try TestDatabase.decode(123, 42);
     try std.testing.expectEqual(42, decoded.msg123.test_signal);
 }
