@@ -15,6 +15,7 @@
 ///! a real PCAN-USB adapter over the PEAK Linux driver + libpcanbasic.so.
 const std = @import("std");
 const builtin = @import("builtin");
+const definitions = @import("definitions.zig");
 
 // useful aliases
 const debugPrint = std.log.debug;
@@ -104,16 +105,9 @@ pub const can_eff_mask: u32 = 0x1FFFFFFF;
 pub const can_sff_mask: u32 = 0x000007FF;
 
 /// The container for a CAN message.
-/// Mirrors socketcan.zig's `CanFrame` field-for-field so both modules can
-/// be used interchangeably by client code.
-pub const CanFrame = extern struct {
-    can_id: u32,
-    len: u8,
-    pad: u8 = 0,
-    res0: u8 = 0,
-    len8_dlc: u8 = 8,
-    data: [8]u8 = undefined,
-};
+/// Shared with socketcan.zig via definitions.zig so both modules can be
+/// used interchangeably by client code.
+pub const CanFrame = definitions.CanFrame;
 
 // ------------------------------------------------------------------
 // Dynamic loading of the PCAN-Basic library

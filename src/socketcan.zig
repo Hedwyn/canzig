@@ -3,6 +3,7 @@
 ///! to send/recv CAN messages from there
 const std = @import("std");
 const utils = @import("utils.zig");
+const definitions = @import("definitions.zig");
 const posix = std.posix;
 const sys = std.posix.system;
 
@@ -111,13 +112,4 @@ const SockaddrCan = extern struct {
 };
 
 /// The container for a CAN message
-/// Requires `extern` as the memory layout has to be strictly identitical
-/// to the C-version
-pub const CanFrame = extern struct {
-    can_id: u32,
-    len: u8,
-    pad: u8,
-    res0: u8 = 0,
-    len8_dlc: u8 = 8,
-    data: [8]u8 = undefined,
-};
+pub const CanFrame = definitions.CanFrame;
