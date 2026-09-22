@@ -20,6 +20,14 @@ const can_raw = 1;
 const sa_family_t = posix.sa_family_t;
 const socket_t = posix.socket_t;
 
+// CAN ID flag bits packed into `CanFrame.can_id`, per the Linux SocketCAN
+// ABI. Exposed for callers building/decoding `CanFrame` values directly
+// (see examples/socketcan_send.zig, examples/socketcan_recv.zig).
+pub const can_eff_flag: u32 = 0x80000000;
+pub const can_rtr_flag: u32 = 0x40000000;
+pub const can_eff_mask: u32 = 0x1FFFFFFF;
+pub const can_sff_mask: u32 = 0x000007FF;
+
 /// Can-related errors
 const CanError = error{
     SendFailed,
@@ -37,7 +45,7 @@ pub fn openSocketCan(can_if_name: []const u8) !socket_t {
     }
     const fd: socket_t = @intCast(socket_rc);
     debugPrint("Opened socket's fileno is {}", .{fd});
-    var ifname = [_]u8{0} ** 16;
+    var ifname: [16]u8 = @splat(0);
     try utils.strcpy(can_if_name, &ifname);
 
     var ifreq = posix.ifreq{

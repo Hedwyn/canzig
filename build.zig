@@ -1,5 +1,50 @@
 const std = @import("std");
 
+// Names of the PCAN examples under examples/, one .zig file each. Built and
+// wired into run steps the same way zig-easy-cli's own build.zig does it
+// for its examples/ directory. Each imports the "pcan" module.
+const pcan_examples = &.{
+    "pcan_send",
+    "pcan_recv",
+};
+
+// Names of the SocketCAN examples under examples/. Each imports the
+// "socketcan" module.
+const socketcan_examples = &.{
+    "socketcan_send",
+    "socketcan_recv",
+};
+
+/// Builds one example executable and its `zig build <name>` run step,
+/// following the same pattern as zig-easy-cli's build.zig.
+fn addExample(
+    b: *std.Build,
+    examples_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    comptime name: []const u8,
+    import_name: []const u8,
+    import_module: *std.Build.Module,
+) void {
+    const example = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/" ++ name ++ ".zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = import_name, .module = import_module },
+            },
+        }),
+    });
+    examples_step.dependOn(&example.step);
+
+    const example_run = b.addRunArtifact(example);
+    example_run.addPassthruArgs();
+    const run_example_step = b.step(name, "Run " ++ name);
+    run_example_step.dependOn(&example_run.step);
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -63,15 +108,46 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // The pcan.zig adapter talks to libpcanbasic.so/PCANBasic.dll through
+    // dlopen/LoadLibrary; on Linux it needs libc linked in so that
+    // `std.DynLib` resolves to the real dlopen-backed implementation
+    // (otherwise the dependency-unaware ELF loader crashes as soon as the
+    // library calls into libc). Declared once here and imported by every
+    // example below.
+    const pcan_mod = b.createModule(.{
+        .root_source_file = b.path("src/pcan.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    // socketcan.zig only uses raw posix syscalls, so unlike pcan_mod it
+    // needs no special build options.
+    const socketcan_mod = b.createModule(.{
+        .root_source_file = b.path("src/socketcan.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Same pattern as zig-easy-cli's build.zig: one executable and one run
+    // step per example, named after the example itself
+    // (e.g. `zig build pcan_send -- 123 0102030405060708`).
+    const examples_step = b.step("examples", "Build the PCAN and SocketCAN examples");
+
+    inline for (pcan_examples) |example_name| {
+        addExample(b, examples_step, target, optimize, example_name, "pcan", pcan_mod);
+    }
+    inline for (socketcan_examples) |example_name| {
+        addExample(b, examples_step, target, optimize, example_name, "socketcan", socketcan_mod);
+    }
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.

@@ -276,7 +276,7 @@ pub fn strcpy(input: []const u8, output: []u8) StrError!void {
 }
 
 test "strcpy" {
-    var output = [_]u8{0} ** 16;
+    var output: [16]u8 = @splat(0);
     const input = "can0";
     try strcpy(input, &output);
     for (0..input.len) |i| {
