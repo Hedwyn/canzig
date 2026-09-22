@@ -53,7 +53,8 @@
         //    .lazy = false,
         //},
         .zig_easy_cli = .{
-            .path = "deps/zig-easy-cli",
+            .url = "git+https://github.com/Hedwyn/zig-easy-cli.git?ref=zig-0.16#293e7bf4f2a6b7fd19817a252cb8afd7e01c1fb1",
+            .hash = "zig_easy_cli-0.1.0-PbQFTBgMAQCmPQo4rj_IQQtP_ldUqTd5JrR6RBpe1nG9",
         },
     },
 

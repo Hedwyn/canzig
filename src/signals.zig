@@ -121,33 +121,24 @@ pub fn CanFrame(
 
         /// Builds a struct type out of the message definition
         pub fn buildContainer() type {
-            var final_fields: [signals.len + 1]Type.StructField = undefined;
+            var field_names: [signals.len + 1][:0]const u8 = undefined;
+            var field_types: [signals.len + 1]type = undefined;
+            var field_attrs: [signals.len + 1]Type.StructField.Attributes = undefined;
             inline for (0.., signals) |i, signal| {
                 const field_type = signal.getType();
-                final_fields[i] = Type.StructField{
-                    .name = @ptrCast(signal.name),
-                    .type = field_type,
-                    .alignment = @alignOf(field_type),
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                };
+                field_names[i] = @ptrCast(signal.name);
+                field_types[i] = field_type;
+                field_attrs[i] = .{ .@"align" = @alignOf(field_type) };
             }
-            final_fields[signals.len] = Type.StructField{
-                .name = "frame",
-                .type = type,
-                .alignment = @alignOf(type),
+            field_names[signals.len] = "frame";
+            field_types[signals.len] = type;
+            field_attrs[signals.len] = .{
+                .@"comptime" = true,
+                .@"align" = @alignOf(type),
                 .default_value_ptr = &Self,
-                .is_comptime = true,
             };
 
-            return @Type(.{
-                .@"struct" = .{
-                    .layout = .auto,
-                    .fields = &final_fields,
-                    .is_tuple = false, // TODO: see what we can do with `true`
-                    .decls = &.{},
-                },
-            });
+            return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
         }
 
         pub fn decode(data: u64, container: anytype) StructErrors!void {
@@ -204,34 +195,23 @@ pub fn CanFrame(
 /// A union containing every possible message from a database
 /// `frames` should be created by CanFrame(..)
 pub fn AnyMessage(comptime frames: []const type) type {
-    var union_fields: [frames.len]Type.UnionField = undefined;
-    var tag_fields: [frames.len]Type.EnumField = undefined;
+    var union_names: [frames.len][:0]const u8 = undefined;
+    var union_types: [frames.len]type = undefined;
+    var union_attrs: [frames.len]Type.UnionField.Attributes = undefined;
+    var tag_names: [frames.len][:0]const u8 = undefined;
+    var tag_values: [frames.len]u16 = undefined;
     @setEvalBranchQuota(10_000);
 
     inline for (0.., frames) |i, frame| {
-        union_fields[i].name = @ptrCast(frame.name);
-        union_fields[i].type = frame.Container;
-        union_fields[i].alignment = 8;
+        union_names[i] = @ptrCast(frame.name);
+        union_types[i] = frame.Container;
+        union_attrs[i] = .{ .@"align" = 8 };
 
-        tag_fields[i].name = @ptrCast(frame.name);
-        tag_fields[i].value = i;
+        tag_names[i] = @ptrCast(frame.name);
+        tag_values[i] = i;
     }
-    const _tag = Type.Enum{
-        .decls = &.{},
-        .fields = &tag_fields,
-        .is_exhaustive = true,
-        .tag_type = u16,
-    };
-    const tag_type = @Type(.{ .@"enum" = _tag });
-    const _union = Type.Union{
-        .layout = .auto,
-        .tag_type = tag_type,
-        .decls = &.{},
-        .fields = &union_fields,
-    };
-    return @Type(.{
-        .@"union" = _union,
-    });
+    const tag_type = @Enum(u16, .exhaustive, &tag_names, &tag_values);
+    return @Union(.auto, tag_type, &union_names, &union_types, &union_attrs);
 }
 
 pub fn Channel(db_name: []const u8, comptime frames: []const type) type {

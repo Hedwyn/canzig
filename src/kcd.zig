@@ -198,11 +198,13 @@ pub const KcdDatabase = struct {
         return KcdDatabase.parseXml(document, allocator);
     }
 
-    pub fn parseFile(fpath: []const u8, allocator: Allocator) !KcdDatabase {
-        const file = try std.fs.cwd().openFile(fpath, .{});
+    pub fn parseFile(io: std.Io, fpath: []const u8, allocator: Allocator) !KcdDatabase {
+        const file = try std.Io.Dir.cwd().openFile(io, fpath, .{});
+        defer file.close(io);
 
-        const reader = file.deprecatedReader();
-        const buffer = reader.readAllAlloc(allocator, kcd_max_size) catch return KcdParseErrors.AllocatorError;
+        var read_buffer: [4096]u8 = undefined;
+        var file_reader = file.reader(io, &read_buffer);
+        const buffer = file_reader.interface.allocRemaining(allocator, .limited(kcd_max_size)) catch return KcdParseErrors.AllocatorError;
         defer allocator.free(buffer);
         return KcdDatabase.parseString(buffer, allocator);
     }

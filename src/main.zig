@@ -31,20 +31,21 @@ const options_doc = [_]easycli.OptionInfo{
     .{ .name = "db_path", .help = "Path to a KCD database to parse" },
 };
 
-pub fn showDatabaseContent(db_path: []const u8) !void {
+pub fn showDatabaseContent(io: std.Io, db_path: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const json_output = try std.fs.cwd().createFile(
+    const json_output = try std.Io.Dir.cwd().createFile(
+        io,
         "output.json",
         .{ .read = true },
     );
-    defer json_output.close();
+    defer json_output.close(io);
     var write_buffer: [4096]u8 = undefined;
-    var json_writer = json_output.writer(&write_buffer);
+    var json_writer = json_output.writer(io, &write_buffer);
 
-    const database = try kcd.KcdDatabase.parseFile(db_path, allocator);
+    const database = try kcd.KcdDatabase.parseFile(io, db_path, allocator);
 
     const serializable_db = try database.serialize(allocator);
 
@@ -53,14 +54,16 @@ pub fn showDatabaseContent(db_path: []const u8) !void {
     std.debug.print("Output exported to output.json\n", .{});
 }
 
-pub fn exportDatabaseToJson(db_path: []const u8) !void {
+pub fn exportDatabaseToJson(io: std.Io, db_path: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const file = try std.fs.cwd().openFile(db_path, .{});
+    const file = try std.Io.Dir.cwd().openFile(io, db_path, .{});
+    defer file.close(io);
 
-    const reader = file.deprecatedReader();
-    const buffer = try reader.readAllAlloc(allocator, 10_000_000);
+    var read_buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    const buffer = try file_reader.interface.allocRemaining(allocator, .limited(10_000_000));
     const database = try kcd.KcdParser(allocator, buffer);
     for (database.items) |msg| {
         // std.log.debug("msg = {}\n", .{msg.*});
@@ -72,13 +75,13 @@ pub fn exportDatabaseToJson(db_path: []const u8) !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const ParserT = easycli.CliParser(.{
         .opts = Options,
         .opts_info = &options_doc,
         .args = Arguments,
     });
-    const params = if (try ParserT.runStandalone()) |p| p else return;
+    const params = if (try ParserT.runStandalone(init)) |p| p else return;
     const can_if = params.options.interface orelse default_can_if;
 
     const fd = try can.openSocketCan(can_if);
@@ -100,7 +103,7 @@ pub fn main() !void {
                 std.debug.print("Please pass a path to a KCD database\n", .{});
                 return;
             };
-            try showDatabaseContent(db_path);
+            try showDatabaseContent(init.io, db_path);
         },
         .encode => {
             std.debug.print("Payload {s}\n", .{params.options.payload});
