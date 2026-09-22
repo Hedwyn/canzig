@@ -15,14 +15,22 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const zig_easy_cli = b.dependency("zig_easy_cli", .{});
-    const lib = b.addStaticLibrary(.{
-        .name = "canzig",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
+    const zig_easy_cli = b.dependency("zig_easy_cli", .{ .target = target, .optimize = optimize });
+    const root_mod = b.addModule("canzig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const main_mod = b.addModule("demo", .{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lib = b.addLibrary(.{
+        .name = "canzig",
+        // In this case the main source file is merely a path, however, in more
+        // complicated build scripts, this could be a generated file.
+        .root_module = root_mod,
     });
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
@@ -31,9 +39,7 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "canzig",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = main_mod,
     });
     exe.root_module.addImport("parser", zig_easy_cli.module("parser"));
     // exe.root_module.addImport("zig_easy_cli", zig_easy_cli);
@@ -69,9 +75,7 @@ pub fn build(b: *std.Build) void {
     // but does not run it.
     // TODO: add other unit tests suites
     const kcd_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/kcd.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = zig_easy_cli.module("parser"),
     });
 
     const run_lib_unit_tests = b.addRunArtifact(kcd_unit_tests);

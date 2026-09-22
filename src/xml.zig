@@ -50,15 +50,15 @@ pub fn GenericList(T: type) type {
                 return .{ .allocator = allocator };
             }
             return .{
-                .runtime = std.ArrayList(T).init(allocator.assert_allocator()),
+                .runtime = std.ArrayList(T).empty,
                 .allocator = allocator,
             };
         }
 
         pub fn deinit(self: Self) void {
             if (!@inComptime()) {
-                const runtime = self.runtime_inner();
-                runtime.deinit();
+                var runtime = self.runtime_inner();
+                runtime.deinit(self.allocator.assert_allocator());
             }
         }
 
@@ -74,7 +74,7 @@ pub fn GenericList(T: type) type {
             if (@inComptime()) {
                 @panic("Not implemented");
             }
-            try self.runtime_inner_mut().append(item);
+            try self.runtime_inner_mut().append(self.allocator.assert_allocator(), item);
             // std.debug.print("Appending {}: {}\n", .{ item, self.runtime.?.items.len });
         }
         pub fn toOwnedSlice(self: *Self) Allocator.Error!Slice {
@@ -82,21 +82,21 @@ pub fn GenericList(T: type) type {
                 @panic("Not implemented");
             }
             var runtime = self.runtime_inner_mut();
-            return try runtime.toOwnedSlice();
+            return try runtime.toOwnedSlice(self.allocator.assert_allocator());
         }
     };
 }
 
 test "generic list" {
     const alloc: PseudoAllocator = .{ .allocator = std.testing.allocator };
-    var normal_list = std.ArrayList(u32).init(alloc.assert_allocator());
+    var normal_list = std.ArrayList(u32).empty;
 
     var list = GenericList(u32).init(alloc);
     defer list.deinit();
-    defer normal_list.deinit();
+    defer normal_list.deinit(std.testing.allocator);
     // std.debug.print("address of ArrayList: {*}", .{list.runtime.?});
     try list.append(1);
-    try normal_list.append(1);
+    try normal_list.append(std.testing.allocator, 1);
 }
 
 pub const Attribute = struct {

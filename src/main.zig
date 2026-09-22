@@ -40,14 +40,16 @@ pub fn showDatabaseContent(db_path: []const u8) !void {
         "output.json",
         .{ .read = true },
     );
-    const json_writer = json_output.writer();
     defer json_output.close();
+    var write_buffer: [4096]u8 = undefined;
+    var json_writer = json_output.writer(&write_buffer);
 
     const database = try kcd.KcdDatabase.parseFile(db_path, allocator);
 
     const serializable_db = try database.serialize(allocator);
 
-    try std.json.stringify(serializable_db.items, .{ .whitespace = .indent_4 }, json_writer);
+    try std.json.Stringify.value(serializable_db.items, .{ .whitespace = .indent_4 }, &json_writer.interface);
+    try json_writer.interface.flush();
     std.debug.print("Output exported to output.json\n", .{});
 }
 
@@ -57,7 +59,7 @@ pub fn exportDatabaseToJson(db_path: []const u8) !void {
     const allocator = arena.allocator();
     const file = try std.fs.cwd().openFile(db_path, .{});
 
-    const reader = file.reader();
+    const reader = file.deprecatedReader();
     const buffer = try reader.readAllAlloc(allocator, 10_000_000);
     const database = try kcd.KcdParser(allocator, buffer);
     for (database.items) |msg| {
