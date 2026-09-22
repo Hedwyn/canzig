@@ -150,9 +150,9 @@ pub const KcdDatabase = struct {
     }
 
     pub fn serialize(self: KcdDatabase, allocator: Allocator) !ArrayList(SerializableMessage) {
-        var messages = ArrayList(SerializableMessage).init(allocator);
+        var messages = ArrayList(SerializableMessage).empty;
         for (self.messages.items) |msg| {
-            try messages.append(self.serializeMessage(msg));
+            try messages.append(allocator, self.serializeMessage(msg));
         }
         return messages;
     }
@@ -170,14 +170,14 @@ pub const KcdDatabase = struct {
 
     /// Moves the internal cursor to the next bus element
     fn getNextElement(current: *const Element, tag: []const u8) ?*Element {
-        var it = current.tagged_elements(tag);
+        var it = current.findChildrenByTag(tag);
         return it.next();
     }
 
     pub fn deinit(self: *KcdDatabase) !void {
         self.document.deinit();
-        self.messages.deinit();
-        self.signals.deinit();
+        self.messages.deinit(self.allocator);
+        self.signals.deinit(self.allocator);
     }
 
     // Constructors
@@ -186,8 +186,8 @@ pub const KcdDatabase = struct {
         var db = KcdDatabase{
             .document = document,
             .allocator = allocator,
-            .signals = .init(allocator),
-            .messages = .init(allocator),
+            .signals = .empty,
+            .messages = .empty,
         };
         try db.inner_parse();
         return db;
@@ -201,7 +201,7 @@ pub const KcdDatabase = struct {
     pub fn parseFile(fpath: []const u8, allocator: Allocator) !KcdDatabase {
         const file = try std.fs.cwd().openFile(fpath, .{});
 
-        const reader = file.reader();
+        const reader = file.deprecatedReader();
         const buffer = reader.readAllAlloc(allocator, kcd_max_size) catch return KcdParseErrors.AllocatorError;
         defer allocator.free(buffer);
         return KcdDatabase.parseString(buffer, allocator);
@@ -221,14 +221,14 @@ pub const KcdDatabase = struct {
     }
 
     pub fn parseMessages(self: *KcdDatabase, bus_element: *xml.Element) KcdParseErrors!void {
-        var msg_it = bus_element.tagged_elements("Message");
+        var msg_it = bus_element.findChildrenByTag("Message");
         while (msg_it.next()) |msg| {
             try self.parseMessage(msg);
         }
     }
 
     pub fn parseMessage(self: *KcdDatabase, msg_element: *Element) KcdParseErrors!void {
-        var signal_it = msg_element.tagged_elements("Signal");
+        var signal_it = msg_element.findChildrenByTag("Signal");
         const signals_start_idx = self.signals.items.len;
         while (signal_it.next()) |signal_element| {
             try self.parseSignal(signal_element);
@@ -242,7 +242,7 @@ pub const KcdDatabase = struct {
             .signals_start_idx = signals_start_idx,
             .signals_end_idx = signals_end_idx,
         };
-        self.messages.append(new_msg) catch return KcdParseErrors.AllocatorError;
+        self.messages.append(self.allocator, new_msg) catch return KcdParseErrors.AllocatorError;
     }
 
     pub fn parseSignal(self: *KcdDatabase, signal_element: *Element) KcdParseErrors!void {
@@ -258,7 +258,7 @@ pub const KcdDatabase = struct {
             .offset = offset,
             .scale = scale,
         };
-        self.signals.append(signal_struct) catch return KcdParseErrors.AllocatorError;
+        self.signals.append(self.allocator, signal_struct) catch return KcdParseErrors.AllocatorError;
     }
 };
 
