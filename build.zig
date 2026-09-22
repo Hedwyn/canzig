@@ -77,12 +77,16 @@ pub fn build(b: *std.Build) void {
     // but does not run it.
     // TODO: add other unit tests suites
     const kcd_unit_tests = b.addTest(.{
-        .root_module = zig_easy_cli.module("parser"),
+        .root_module = b.createModule(.{
+            .root_source_file = zig_easy_cli.path("src/parser.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     const run_lib_unit_tests = b.addRunArtifact(kcd_unit_tests);
 
-    kcd_unit_tests.addIncludePath(
+    kcd_unit_tests.root_module.addIncludePath(
         std.Build.LazyPath{ .cwd_relative = "src/test_files/can_definition_sample.kcd" },
     );
 

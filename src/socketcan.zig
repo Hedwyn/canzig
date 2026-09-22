@@ -31,7 +31,11 @@ const CanError = error{
 /// Returns the fileno if succes
 /// Or CanError if failing to open the socket
 pub fn openSocketCan(can_if_name: []const u8) !socket_t {
-    const fd = try posix.socket(pf_can, sock_raw, can_raw);
+    const socket_rc = sys.socket(pf_can, sock_raw, can_raw);
+    if (sys.errno(socket_rc) != .SUCCESS) {
+        return CanError.SocketCanFailure;
+    }
+    const fd: socket_t = @intCast(socket_rc);
     debugPrint("Opened socket's fileno is {}", .{fd});
     var ifname = [_]u8{0} ** 16;
     try utils.strcpy(can_if_name, &ifname);
@@ -40,25 +44,27 @@ pub fn openSocketCan(can_if_name: []const u8) !socket_t {
         .ifrn = .{ .name = ifname },
         .ifru = undefined,
     };
-    posix.ioctl_SIOCGIFINDEX(fd, &ifreq) catch |e| {
-        debugPrint("ioctl reported {} when trying to get the can interface index", .{e});
+    const ioctl_rc = sys.ioctl(fd, sys.SIOCGIFINDEX, @intFromPtr(&ifreq));
+    if (sys.errno(ioctl_rc) != .SUCCESS) {
+        debugPrint("ioctl reported an error when trying to get the can interface index", .{});
         return CanError.InterfaceNotFound;
-    };
+    }
     debugPrint("CAN interface index is {}", .{ifreq.ifru.ivalue});
     var can_addr: SockaddrCan = .{
         .can_ifindex = ifreq.ifru.ivalue,
     };
     const addr: *posix.sockaddr = @ptrCast(&can_addr);
-    posix.bind(fd, addr, @sizeOf(SockaddrCan)) catch {
+    const bind_rc = sys.bind(fd, addr, @sizeOf(SockaddrCan));
+    if (sys.errno(bind_rc) != .SUCCESS) {
         return CanError.SocketCanFailure;
-    };
+    }
     debugPrint("Bound to socketcan successfully", .{});
 
     return fd;
 }
 
 pub fn closeSocketCan(fd: socket_t) void {
-    posix.close(fd);
+    _ = sys.close(fd);
 }
 
 pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
