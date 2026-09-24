@@ -98,8 +98,7 @@ pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
 pub fn canRecv(fd: socket_t) CanFrame {
     var _frame: CanFrame = undefined;
     const ret = sys.recvfrom(fd, @ptrCast(&_frame), @sizeOf(CanFrame), 0, null, null);
-
-    std.debug.print("Recv returned {}\n", .{ret});
+    _ = ret;
     return _frame;
 }
 

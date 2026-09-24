@@ -335,7 +335,6 @@ test "get type" {
             .signed = param.signed,
         };
         std.testing.expectEqual(param.expects, int_signal.getType()) catch |e| {
-            std.debug.print("--> Context: [{any}]: {}\n\n", .{ param, e });
             return e;
         };
     }
@@ -403,8 +402,7 @@ test "encode message" {
     const Container = struct { test_signal: u8 };
     const container: Container = .{ .test_signal = 42 };
     const data = try MyMessage.encode(container);
-    std.debug.print("0x{x:0>8}\n", .{data});
-    // _ = data;
+    _ = data;
     // try my_message.decode(test_data, &container);
     // try std.testing.expectEqual(container.test_signal, 0x42);
 }

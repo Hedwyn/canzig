@@ -74,7 +74,6 @@ const GermanString = extern union {
     pub fn toSlice(self: GermanString) []const u8 {
         const short_str = self.short;
         const len = short_str.len;
-        std.debug.print("Len is {}\n", .{len});
         if (len <= short_string_max_len) {
             // short
             return short_str.content[0..len];
@@ -205,10 +204,6 @@ test "german long string startswith" {
     };
     for (test_cases) |test_case| {
         std.testing.expectEqual(long.startsWith(test_case.prefix), test_case.expects) catch |e| {
-            std.debug.print(
-                "--> Failed: `{s}`\n with prefix:`{s}`\n: expected {}",
-                .{ candidate, test_case.prefix, test_case.expects },
-            );
             return e;
         };
     }
@@ -226,10 +221,6 @@ test "german short string startswith" {
     };
     for (test_cases) |test_case| {
         std.testing.expectEqual(long.startsWith(test_case.prefix), test_case.expects) catch |e| {
-            std.debug.print(
-                "--> Failed: `{s}`\n with prefix:`{s}`\n: expected {}",
-                .{ candidate, test_case.prefix, test_case.expects },
-            );
             return e;
         };
     }
@@ -267,7 +258,6 @@ pub fn findElementByField(
 /// Returns StrError if output is too small
 pub fn strcpy(input: []const u8, output: []u8) StrError!void {
     if (input.len > output.len) {
-        std.debug.print("Input cannot fit into output", .{});
         return StrError.BufferTooSmall;
     }
     for (0..input.len) |i| {
