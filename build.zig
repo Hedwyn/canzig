@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     _ = b.addModule("socketcan", .{ .root_source_file = b.path("src/socketcan.zig") });
+    _ = b.addModule("pcan", .{ .root_source_file = b.path("src/pcan.zig") });
 
     const main_mod = b.addModule("demo", .{
         .root_source_file = b.path("src/main.zig"),
