@@ -21,13 +21,14 @@ const can_raw = 1;
 const sa_family_t = posix.sa_family_t;
 const socket_t = posix.socket_t;
 
-// CAN ID flag bits packed into `CanFrame.can_id`, per the Linux SocketCAN
-// ABI. Exposed for callers building/decoding `CanFrame` values directly
-// (see examples/socketcan_send.zig, examples/socketcan_recv.zig).
-pub const can_eff_flag: u32 = 0x80000000;
-pub const can_rtr_flag: u32 = 0x40000000;
-pub const can_eff_mask: u32 = 0x1FFFFFFF;
-pub const can_sff_mask: u32 = 0x000007FF;
+// CAN ID flag bits packed into `CanFrame.raw_can_id`, per the Linux
+// SocketCAN ABI. Re-exported from definitions.zig for callers
+// building/decoding `CanFrame` values directly (see
+// examples/socketcan_send.zig, examples/socketcan_recv.zig).
+pub const can_eff_flag = definitions.can_eff_flag;
+pub const can_rtr_flag = definitions.can_rtr_flag;
+pub const can_eff_mask = definitions.can_eff_mask;
+pub const can_sff_mask = definitions.can_sff_mask;
 
 /// Can-related errors
 const CanError = error{

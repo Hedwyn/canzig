@@ -112,14 +112,15 @@ const pcan_message_standard: TPCANMessageType = 0x00;
 const pcan_message_rtr: TPCANMessageType = 0x01;
 const pcan_message_extended: TPCANMessageType = 0x02;
 
-// SocketCAN-style flag bits packed into `CanFrame.can_id`, kept identical to
-// the Linux SocketCAN ABI so that frames built for socketcan.zig can be
-// reused as-is with this module. Exposed for callers building `CanFrame`
-// values directly (see examples/pcan_send.zig).
-pub const can_eff_flag: u32 = 0x80000000;
-pub const can_rtr_flag: u32 = 0x40000000;
-pub const can_eff_mask: u32 = 0x1FFFFFFF;
-pub const can_sff_mask: u32 = 0x000007FF;
+// SocketCAN-style flag bits packed into `CanFrame.raw_can_id`, kept
+// identical to the Linux SocketCAN ABI so that frames built for
+// socketcan.zig can be reused as-is with this module. Re-exported from
+// definitions.zig for callers building `CanFrame` values directly (see
+// examples/pcan_send.zig).
+pub const can_eff_flag = definitions.can_eff_flag;
+pub const can_rtr_flag = definitions.can_rtr_flag;
+pub const can_eff_mask = definitions.can_eff_mask;
+pub const can_sff_mask = definitions.can_sff_mask;
 
 /// The container for a CAN message.
 /// Shared with socketcan.zig via definitions.zig so both modules can be
@@ -392,17 +393,15 @@ pub fn closePcan(handle: *PcanHandle) void {
 }
 
 pub fn canSend(handle: *PcanHandle, frame: *const CanFrame) CanError!usize {
-    const is_extended = (frame.can_id & can_eff_flag) != 0;
-    const is_rtr = (frame.can_id & can_rtr_flag) != 0;
-    const raw_id = frame.can_id & (if (is_extended) can_eff_mask else can_sff_mask);
+    const is_extended = frame.isExtended();
 
     var msgtype: TPCANMessageType = if (is_extended) pcan_message_extended else pcan_message_standard;
-    if (is_rtr) {
+    if (frame.isRtr()) {
         msgtype |= pcan_message_rtr;
     }
 
     const msg = TPCANMsg{
-        .id = raw_id,
+        .id = frame.can_id(),
         .msgtype = msgtype,
         .len = frame.len,
         .data = frame.data,
@@ -416,16 +415,16 @@ pub fn canSend(handle: *PcanHandle, frame: *const CanFrame) CanError!usize {
 }
 
 fn frameFromMsg(msg: TPCANMsg) CanFrame {
-    var can_id: u32 = msg.id;
+    var raw_can_id: u32 = msg.id;
     if ((msg.msgtype & pcan_message_extended) != 0) {
-        can_id |= can_eff_flag;
+        raw_can_id |= can_eff_flag;
     }
     if ((msg.msgtype & pcan_message_rtr) != 0) {
-        can_id |= can_rtr_flag;
+        raw_can_id |= can_rtr_flag;
     }
 
     return CanFrame{
-        .can_id = can_id,
+        .raw_can_id = raw_can_id,
         .len = msg.len,
         .data = msg.data,
     };

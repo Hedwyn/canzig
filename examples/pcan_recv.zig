@@ -27,16 +27,13 @@ pub fn main(init: std.process.Init) !void {
     var received: usize = 0;
     while (count == 0 or received < count) : (received += 1) {
         const frame = pcan.canRecv(&handle);
-        const is_extended = (frame.can_id & pcan.can_eff_flag) != 0;
-        const is_rtr = (frame.can_id & pcan.can_rtr_flag) != 0;
-        const raw_id = frame.can_id & (if (is_extended) pcan.can_eff_mask else pcan.can_sff_mask);
 
         std.debug.print(
             "id=0x{x}{s}{s} len={} data={x}\n",
             .{
-                raw_id,
-                if (is_extended) "x" else "",
-                if (is_rtr) " RTR" else "",
+                frame.can_id(),
+                if (frame.isExtended()) "x" else "",
+                if (frame.isRtr()) " RTR" else "",
                 frame.len,
                 frame.data[0..frame.len],
             },

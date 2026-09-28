@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     defer can.closeSocketCan(fd);
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const test_frame = can.CanFrame{
-        .can_id = 0x123,
+        .raw_can_id = 0x123,
         .len = 8,
         .pad = 0,
         .data = data,

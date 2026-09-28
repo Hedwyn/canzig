@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     const is_extended = can_id > pcan.can_sff_mask;
 
     var frame = pcan.CanFrame{
-        .can_id = if (is_extended) can_id | pcan.can_eff_flag else can_id,
+        .raw_can_id = if (is_extended) can_id | pcan.can_eff_flag else can_id,
         .len = @intCast(payload_arg.len / 2),
         .data = @splat(0),
     };
