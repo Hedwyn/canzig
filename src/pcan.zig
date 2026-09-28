@@ -29,6 +29,22 @@ const cc: std.builtin.CallingConvention = if (is_windows) .winapi else .c;
 
 extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(cc) void;
 
+/// Opaque Win32 handle, used for the PCAN_RECEIVE_EVENT event object below.
+const HANDLE = *anyopaque;
+
+extern "kernel32" fn CreateEventW(
+    lpEventAttributes: ?*anyopaque,
+    bManualReset: i32,
+    bInitialState: i32,
+    lpName: ?[*:0]const u16,
+) callconv(cc) ?HANDLE;
+extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(cc) i32;
+extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: u32) callconv(cc) u32;
+
+// Win32 WaitForSingleObject result codes actually used here (winbase.h).
+const wait_object_0: u32 = 0x00000000;
+const wait_timeout: u32 = 0x00000102;
+
 /// Blocks the calling thread for `ms` milliseconds. Used while polling the
 /// PCAN receive queue. `std.Thread.sleep` requires threading an `Io`
 /// instance through in this Zig version, which would leak into this
@@ -88,6 +104,7 @@ const pcan_error_qrcvempty: TPCANStatus = 0x00020;
 
 // PCAN parameters
 const pcan_allow_error_frames: TPCANParameter = 0x20;
+const pcan_receive_event: TPCANParameter = 0x03;
 const pcan_parameter_on: u32 = 0x01;
 
 // PCAN message types
@@ -204,6 +221,7 @@ const ResetFn = *const fn (channel: TPCANHandle) callconv(cc) TPCANStatus;
 const GetStatusFn = *const fn (channel: TPCANHandle) callconv(cc) TPCANStatus;
 const ReadFn = *const fn (channel: TPCANHandle, msg: *TPCANMsg, timestamp: *TPCANTimestamp) callconv(cc) TPCANStatus;
 const WriteFn = *const fn (channel: TPCANHandle, msg: *const TPCANMsg) callconv(cc) TPCANStatus;
+const GetValueFn = *const fn (channel: TPCANHandle, parameter: TPCANParameter, buffer: *anyopaque, buffer_len: u32) callconv(cc) TPCANStatus;
 const SetValueFn = *const fn (channel: TPCANHandle, parameter: TPCANParameter, buffer: *anyopaque, buffer_len: u32) callconv(cc) TPCANStatus;
 const GetErrorTextFn = *const fn (err: TPCANStatus, language: u16, buffer: [*]u8) callconv(cc) TPCANStatus;
 
@@ -220,8 +238,15 @@ pub const PcanHandle = struct {
     get_status_fn: GetStatusFn,
     read_fn: ReadFn,
     write_fn: WriteFn,
+    get_value_fn: GetValueFn,
     set_value_fn: SetValueFn,
     get_error_text_fn: GetErrorTextFn,
+    /// Win32 event object registered via CAN_SetValue(PCAN_RECEIVE_EVENT),
+    /// signaled by the driver whenever a frame arrives. Windows only - see
+    /// `waitForReceiveEvent`. PCAN-Basic's Linux equivalent for this same
+    /// parameter just hands back the underlying SocketCAN driver's fd, with
+    /// no benefit over using socketcan.zig directly, so it's not bound here.
+    event_handle: if (is_windows) HANDLE else void,
 };
 
 // Known PCAN-USB channel names, as defined by PCAN-Basic (PCANBasic.h).
@@ -305,6 +330,7 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
     const get_status_fn = try lookupSymbol(&lib, GetStatusFn, "CAN_GetStatus");
     const read_fn = try lookupSymbol(&lib, ReadFn, "CAN_Read");
     const write_fn = try lookupSymbol(&lib, WriteFn, "CAN_Write");
+    const get_value_fn = try lookupSymbol(&lib, GetValueFn, "CAN_GetValue");
     const set_value_fn = try lookupSymbol(&lib, SetValueFn, "CAN_SetValue");
     const get_error_text_fn = try lookupSymbol(&lib, GetErrorTextFn, "CAN_GetErrorText");
 
@@ -325,9 +351,29 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         .get_status_fn = get_status_fn,
         .read_fn = read_fn,
         .write_fn = write_fn,
+        .get_value_fn = get_value_fn,
         .set_value_fn = set_value_fn,
         .get_error_text_fn = get_error_text_fn,
+        .event_handle = if (is_windows) undefined else {},
     };
+
+    if (is_windows) {
+        // Auto-reset, initially-unsignaled event, registered with the
+        // driver so it gets signaled whenever a frame lands in the receive
+        // queue - see PCAN-Basic's PCAN_RECEIVE_EVENT documentation.
+        var event_handle = CreateEventW(null, 0, 0, null) orelse {
+            _ = handle.uninitialize_fn(handle.channel);
+            return CanError.InitializationFailed;
+        };
+        const set_status = handle.set_value_fn(handle.channel, pcan_receive_event, @ptrCast(&event_handle), @sizeOf(HANDLE));
+        if (set_status != pcan_error_ok) {
+            debugPrint("PCAN CAN_SetValue(PCAN_RECEIVE_EVENT) failed with status 0x{x}", .{set_status});
+            _ = CloseHandle(event_handle);
+            _ = handle.uninitialize_fn(handle.channel);
+            return CanError.InitializationFailed;
+        }
+        handle.event_handle = event_handle;
+    }
 
     // Report bus errors as (pseudo) frames rather than only surfacing them
     // through CAN_GetStatus.
@@ -339,6 +385,9 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
 
 pub fn closePcan(handle: *PcanHandle) void {
     _ = handle.uninitialize_fn(handle.channel);
+    if (is_windows) {
+        _ = CloseHandle(handle.event_handle);
+    }
     handle.lib.close();
 }
 
@@ -366,6 +415,22 @@ pub fn canSend(handle: *PcanHandle, frame: *const CanFrame) CanError!usize {
     return frame.len;
 }
 
+fn frameFromMsg(msg: TPCANMsg) CanFrame {
+    var can_id: u32 = msg.id;
+    if ((msg.msgtype & pcan_message_extended) != 0) {
+        can_id |= can_eff_flag;
+    }
+    if ((msg.msgtype & pcan_message_rtr) != 0) {
+        can_id |= can_rtr_flag;
+    }
+
+    return CanFrame{
+        .can_id = can_id,
+        .len = msg.len,
+        .data = msg.data,
+    };
+}
+
 /// Receives a message from the CAN bus.
 /// Waits forever if nothing is available (polls the PCAN receive queue),
 /// matching socketcan.zig's `canRecv` semantics.
@@ -384,18 +449,45 @@ pub fn canRecv(handle: *PcanHandle) CanFrame {
         sleepMs(1);
     }
 
-    var can_id: u32 = msg.id;
-    if ((msg.msgtype & pcan_message_extended) != 0) {
-        can_id |= can_eff_flag;
+    return frameFromMsg(msg);
+}
+
+/// Attempts a single, non-blocking read from the PCAN receive queue.
+/// Returns `null` immediately if the queue is empty, without sleeping or
+/// retrying - unlike `canRecv`, which polls forever. Intended to be paired
+/// with `waitForReceiveEvent`: wait for the event to signal, then drain the
+/// queue by calling `tryRecv` in a loop until it returns `null`, since one
+/// signal can correspond to more than one queued frame.
+pub fn tryRecv(handle: *PcanHandle) CanError!?CanFrame {
+    var msg: TPCANMsg = undefined;
+    var timestamp: TPCANTimestamp = undefined;
+
+    const status = handle.read_fn(handle.channel, &msg, &timestamp);
+    if (status == pcan_error_qrcvempty) {
+        return null;
     }
-    if ((msg.msgtype & pcan_message_rtr) != 0) {
-        can_id |= can_rtr_flag;
+    if (status != pcan_error_ok) {
+        debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
+        return CanError.ReadFailed;
     }
 
-    return CanFrame{
-        .can_id = can_id,
-        .len = msg.len,
-        .data = msg.data,
+    return frameFromMsg(msg);
+}
+
+/// Waits up to `timeout_ms` milliseconds for the PCAN receive event to
+/// signal. Windows only: backed by the Win32 event object registered via
+/// CAN_SetValue(PCAN_RECEIVE_EVENT) in `openPcan`. Returns `true` if the
+/// event signaled, `false` on timeout. On Linux, use `canRecv`/`tryRecv`
+/// directly, or socketcan.zig with your own select/poll loop.
+pub fn waitForReceiveEvent(handle: *PcanHandle, timeout_ms: u32) CanError!bool {
+    if (!is_windows) {
+        @compileError("waitForReceiveEvent is only available on Windows");
+    }
+    const wait_result = WaitForSingleObject(handle.event_handle, timeout_ms);
+    return switch (wait_result) {
+        wait_object_0 => true,
+        wait_timeout => false,
+        else => CanError.ReadFailed,
     };
 }
 

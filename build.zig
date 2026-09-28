@@ -6,6 +6,7 @@ const std = @import("std");
 const pcan_examples = &.{
     "pcan_send",
     "pcan_recv",
+    "pcan_event_wait",
 };
 
 // Names of the SocketCAN examples under examples/. Each imports the
