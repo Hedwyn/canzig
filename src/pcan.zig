@@ -15,7 +15,7 @@
 ///! a real PCAN-USB adapter over the PEAK Linux driver + libpcanbasic.so.
 const std = @import("std");
 const builtin = @import("builtin");
-const definitions = @import("definitions.zig");
+const definitions = @import("definitions");
 
 // useful aliases
 const debugPrint = std.log.debug;

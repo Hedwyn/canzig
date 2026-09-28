@@ -67,13 +67,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    _ = b.addModule("socketcan", .{ .root_source_file = b.path("src/socketcan.zig") });
-    _ = b.addModule("pcan", .{ .root_source_file = b.path("src/pcan.zig") });
+    const definitions_mod = b.addModule("definitions", .{ .root_source_file = b.path("src/definitions.zig") });
+    _ = b.addModule("socketcan", .{
+        .root_source_file = b.path("src/socketcan.zig"),
+        .imports = &.{.{ .name = "definitions", .module = definitions_mod }},
+    });
+    _ = b.addModule("pcan", .{
+        .root_source_file = b.path("src/pcan.zig"),
+        .imports = &.{.{ .name = "definitions", .module = definitions_mod }},
+    });
 
     const main_mod = b.addModule("demo", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "definitions", .module = definitions_mod }},
     });
     const lib = b.addLibrary(.{
         .name = "canzig",
@@ -129,6 +137,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{.{ .name = "definitions", .module = definitions_mod }},
     });
 
     // socketcan.zig only uses raw posix syscalls, so unlike pcan_mod it
@@ -137,6 +146,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/socketcan.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "definitions", .module = definitions_mod }},
     });
 
     // Same pattern as zig-easy-cli's build.zig: one executable and one run

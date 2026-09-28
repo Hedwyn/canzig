@@ -3,7 +3,7 @@
 ///! to send/recv CAN messages from there
 const std = @import("std");
 const utils = @import("utils.zig");
-const definitions = @import("definitions.zig");
+const definitions = @import("definitions");
 const posix = std.posix;
 const sys = std.posix.system;
 
