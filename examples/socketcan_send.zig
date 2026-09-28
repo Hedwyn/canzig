@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
         frame.data[i] = try std.fmt.parseInt(u8, payload_arg[i * 2 .. i * 2 + 2], 16);
     }
 
-    const fd = try can.openSocketCan(interface);
+    const fd = try can.openSocketCan(interface, false);
     defer can.closeSocketCan(fd);
 
     // `canSend`'s return value is the raw socket write size (always

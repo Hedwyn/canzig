@@ -111,6 +111,12 @@ const pcan_parameter_on: u32 = 0x01;
 const pcan_message_standard: TPCANMessageType = 0x00;
 const pcan_message_rtr: TPCANMessageType = 0x01;
 const pcan_message_extended: TPCANMessageType = 0x02;
+// Pseudo-frame markers: set instead of standard/rtr/extended when the
+// "message" is actually the driver reporting a bus error or a status change
+// (see `pcan_allow_error_frames` in `openPcan`), not a real CAN frame.
+const pcan_message_errframe: TPCANMessageType = 0x40;
+const pcan_message_status: TPCANMessageType = 0x80;
+const pcan_message_pseudo_mask: TPCANMessageType = pcan_message_errframe | pcan_message_status;
 
 // SocketCAN-style flag bits packed into `CanFrame.raw_can_id`, kept
 // identical to the Linux SocketCAN ABI so that frames built for
@@ -119,6 +125,7 @@ const pcan_message_extended: TPCANMessageType = 0x02;
 // examples/pcan_send.zig).
 pub const can_eff_flag = definitions.can_eff_flag;
 pub const can_rtr_flag = definitions.can_rtr_flag;
+pub const can_err_flag = definitions.can_err_flag;
 pub const can_eff_mask = definitions.can_eff_mask;
 pub const can_sff_mask = definitions.can_sff_mask;
 
@@ -415,6 +422,21 @@ pub fn canSend(handle: *PcanHandle, frame: *const CanFrame) CanError!usize {
 }
 
 fn frameFromMsg(msg: TPCANMsg) CanFrame {
+    // A bus error or status change (only possible when
+    // `pcan_allow_error_frames` is on, see `openPcan`) is not a real CAN
+    // frame: `msg.id` there holds a TPCANStatus error/status code, not a CAN
+    // identifier, and the extended/RTR bits are meaningless. Tag it with
+    // `can_err_flag` instead of letting it masquerade as an ordinary data
+    // frame with a bogus id - mirrors how SocketCAN itself reports bus
+    // errors as CAN_ERR_FLAG-tagged frames.
+    if ((msg.msgtype & pcan_message_pseudo_mask) != 0) {
+        return CanFrame{
+            .raw_can_id = can_err_flag | (msg.id & can_eff_mask),
+            .len = msg.len,
+            .data = msg.data,
+        };
+    }
+
     var raw_can_id: u32 = msg.id;
     if ((msg.msgtype & pcan_message_extended) != 0) {
         raw_can_id |= can_eff_flag;

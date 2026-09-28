@@ -29,11 +29,12 @@ pub fn main(init: std.process.Init) !void {
         const frame = pcan.canRecv(&handle);
 
         std.debug.print(
-            "id=0x{x}{s}{s} len={} data={x}\n",
+            "id=0x{x}{s}{s}{s} len={} data={x}\n",
             .{
                 frame.can_id(),
                 if (frame.isExtended()) "x" else "",
                 if (frame.isRtr()) " RTR" else "",
+                if (frame.isError()) " ERR" else "",
                 frame.len,
                 frame.data[0..frame.len],
             },
