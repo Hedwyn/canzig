@@ -17,6 +17,12 @@ const af_can = pf_can;
 const sock_raw = 3;
 const can_raw = 1;
 
+// CAN_RAW socket-level option (SOL_CAN_RAW) enabling error frame reception,
+// and the mask requesting every error class (see linux/can/error.h).
+const sol_can_raw = 101;
+const can_raw_err_filter: u32 = 2;
+const can_err_mask_all: u32 = 0x1FFFFFFF;
+
 // type aliases
 const sa_family_t = posix.sa_family_t;
 const socket_t = posix.socket_t;
@@ -27,6 +33,7 @@ const socket_t = posix.socket_t;
 // examples/socketcan_send.zig, examples/socketcan_recv.zig).
 pub const can_eff_flag = definitions.can_eff_flag;
 pub const can_rtr_flag = definitions.can_rtr_flag;
+pub const can_err_flag = definitions.can_err_flag;
 pub const can_eff_mask = definitions.can_eff_mask;
 pub const can_sff_mask = definitions.can_sff_mask;
 
@@ -38,15 +45,29 @@ const CanError = error{
 };
 
 /// Opens a socketcan socket.
+/// `allow_error_frames` controls whether the kernel is asked to deliver bus
+/// error frames on this socket (via `CAN_RAW_ERR_FILTER`) rather than
+/// dropping them - they arrive as ordinary `CanFrame` values with
+/// `isError()` set, see definitions.zig.
 /// Returns the fileno if succes
 /// Or CanError if failing to open the socket
-pub fn openSocketCan(can_if_name: []const u8) !socket_t {
+pub fn openSocketCan(can_if_name: []const u8, allow_error_frames: bool) !socket_t {
     const socket_rc = sys.socket(pf_can, sock_raw, can_raw);
     if (sys.errno(socket_rc) != .SUCCESS) {
         return CanError.SocketCanFailure;
     }
     const fd: socket_t = @intCast(socket_rc);
     debugPrint("Opened socket's fileno is {}", .{fd});
+
+    if (allow_error_frames) {
+        var err_mask: u32 = can_err_mask_all;
+        const setsockopt_rc = sys.setsockopt(fd, sol_can_raw, can_raw_err_filter, @ptrCast(&err_mask), @sizeOf(u32));
+        if (sys.errno(setsockopt_rc) != .SUCCESS) {
+            debugPrint("setsockopt(CAN_RAW_ERR_FILTER) failed", .{});
+            return CanError.SocketCanFailure;
+        }
+    }
+
     var ifname: [16]u8 = @splat(0);
     try utils.strcpy(can_if_name, &ifname);
 
