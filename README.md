@@ -19,7 +19,7 @@ The demo code will send a single message, then wait (potentially forever) for a 
 Example usage is as follows:
 ```zig
 const can = @import("socketcan.zig");
-const fd = try can.openSocketCan("can0");
+const fd = try can.openSocketCan("can0", .{});
 defer can.closeSocketCan(fd);
 // Sending 12345678 in hex to address 123
 const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };

@@ -136,6 +136,7 @@ const pcan_error_bus_warnings: TPCANStatus = pcan_error_buslight | pcan_error_bu
 // PCAN parameters
 const pcan_allow_status_frames: TPCANParameter = 0x1E;
 const pcan_allow_error_frames: TPCANParameter = 0x20;
+const pcan_allow_echo_frames: TPCANParameter = 0x2C;
 const pcan_receive_event: TPCANParameter = 0x03;
 const pcan_parameter_off: u32 = 0x00;
 const pcan_parameter_on: u32 = 0x01;
@@ -144,6 +145,9 @@ const pcan_parameter_on: u32 = 0x01;
 const pcan_message_standard: TPCANMessageType = 0x00;
 const pcan_message_rtr: TPCANMessageType = 0x01;
 const pcan_message_extended: TPCANMessageType = 0x02;
+// Set on a frame this channel sent itself, received back because
+// `pcan_allow_echo_frames` is on (see `openPcan`).
+const pcan_message_echo: TPCANMessageType = 0x20;
 // Pseudo-frame markers: set instead of standard/rtr/extended when the
 // "message" is actually the driver reporting a bus error or a status change
 // (see `pcan_allow_error_frames` in `openPcan`), not a real CAN frame.
@@ -161,6 +165,8 @@ pub const can_rtr_flag = definitions.can_rtr_flag;
 pub const can_err_flag = definitions.can_err_flag;
 pub const can_eff_mask = definitions.can_eff_mask;
 pub const can_sff_mask = definitions.can_sff_mask;
+
+pub const OpenOptions = definitions.OpenOptions;
 
 /// The container for a CAN message.
 /// Shared with socketcan.zig via definitions.zig so both modules can be
@@ -369,9 +375,11 @@ fn pcanBaudrate(bitrate: u32) TPCANBaudrate {
 /// operate the channel.
 /// `allow_error_frames` controls whether bus errors and status changes are
 /// delivered as (pseudo) frames, with `isError()` set (see `frameFromMsg`),
-/// rather than dropped - same semantics as socketcan.zig's `openSocketCan`.
+/// rather than dropped. See `OpenOptions` (definitions.zig) for what each
+/// option maps to; `enable_timestamps` is ignored, the driver always
+/// timestamps frames.
 /// Returns CanError on failure.
-pub fn openPcan(channel_name: []const u8, bitrate: u32, allow_error_frames: bool) !PcanHandle {
+pub fn openPcan(channel_name: []const u8, bitrate: u32, options: OpenOptions) !PcanHandle {
     var lib = try loadLib();
     errdefer lib.close();
 
@@ -431,9 +439,14 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32, allow_error_frames: bool
     // Set explicitly both ways: PCAN-Basic delivers status frames by
     // default, which would otherwise leak through with
     // `allow_error_frames = false`.
-    var error_frames_value: u32 = if (allow_error_frames) pcan_parameter_on else pcan_parameter_off;
+    var error_frames_value: u32 = if (options.allow_error_frames) pcan_parameter_on else pcan_parameter_off;
     _ = handle.set_value_fn(handle.channel, pcan_allow_error_frames, @ptrCast(&error_frames_value), @sizeOf(u32));
     _ = handle.set_value_fn(handle.channel, pcan_allow_status_frames, @ptrCast(&error_frames_value), @sizeOf(u32));
+
+    // Receive the frames this channel sends itself, flagged with
+    // `isEcho()` (see `OpenOptions.echo`).
+    var echo_value: u32 = if (options.echo) pcan_parameter_on else pcan_parameter_off;
+    _ = handle.set_value_fn(handle.channel, pcan_allow_echo_frames, @ptrCast(&echo_value), @sizeOf(u32));
 
     return handle;
 }
@@ -495,6 +508,7 @@ fn frameFromMsg(msg: TPCANMsg) CanFrame {
     return CanFrame{
         .raw_can_id = raw_can_id,
         .len = msg.len,
+        .res0 = if ((msg.msgtype & pcan_message_echo) != 0) definitions.can_frame_echo_flag else 0,
         .data = msg.data,
     };
 }

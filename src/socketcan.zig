@@ -22,6 +22,10 @@ const can_raw = 1;
 const sol_can_raw = 101;
 const can_raw_err_filter: u32 = 2;
 const can_err_mask_all: u32 = 0x1FFFFFFF;
+// SOL_CAN_RAW option asking the kernel to also deliver the frames this very
+// socket sent (needs CAN_RAW_LOOPBACK, which is on by default). Such frames
+// come back with MSG_CONFIRM set in the recvmsg() flags.
+const can_raw_recv_own_msgs: u32 = 4;
 
 // Alignment CMSG_DATA/CMSG_NXTHDR pad to (glibc's CMSG_ALIGN), used to walk
 // the ancillary-data buffer filled in by recvmsg() - see
@@ -42,6 +46,8 @@ pub const can_err_flag = definitions.can_err_flag;
 pub const can_eff_mask = definitions.can_eff_mask;
 pub const can_sff_mask = definitions.can_sff_mask;
 
+pub const OpenOptions = definitions.OpenOptions;
+
 /// Can-related errors
 const CanError = error{
     SendFailed,
@@ -50,16 +56,12 @@ const CanError = error{
 };
 
 /// Opens a socketcan socket.
-/// `allow_error_frames` controls whether the kernel is asked to deliver bus
-/// error frames on this socket (via `CAN_RAW_ERR_FILTER`) rather than
-/// dropping them - they arrive as ordinary `CanFrame` values with
-/// `isError()` set, see definitions.zig.
-/// `enable_timestamps` controls whether the kernel is asked to timestamp
-/// incoming frames (via `SO_TIMESTAMPNS`), required before calling
-/// `canRecvTimestamped` on the returned socket.
+/// See `OpenOptions` (definitions.zig) for what each option maps to;
+/// `enable_timestamps` is required before calling `canRecvTimestamped` on
+/// the returned socket.
 /// Returns the fileno if succes
 /// Or CanError if failing to open the socket
-pub fn openSocketCan(can_if_name: []const u8, allow_error_frames: bool, enable_timestamps: bool) !socket_t {
+pub fn openSocketCan(can_if_name: []const u8, options: OpenOptions) !socket_t {
     const socket_rc = sys.socket(pf_can, sock_raw, can_raw);
     if (sys.errno(socket_rc) != .SUCCESS) {
         return CanError.SocketCanFailure;
@@ -67,7 +69,7 @@ pub fn openSocketCan(can_if_name: []const u8, allow_error_frames: bool, enable_t
     const fd: socket_t = @intCast(socket_rc);
     debugPrint("Opened socket's fileno is {}", .{fd});
 
-    if (allow_error_frames) {
+    if (options.allow_error_frames) {
         var err_mask: u32 = can_err_mask_all;
         const setsockopt_rc = sys.setsockopt(fd, sol_can_raw, can_raw_err_filter, @ptrCast(&err_mask), @sizeOf(u32));
         if (sys.errno(setsockopt_rc) != .SUCCESS) {
@@ -76,7 +78,16 @@ pub fn openSocketCan(can_if_name: []const u8, allow_error_frames: bool, enable_t
         }
     }
 
-    if (enable_timestamps) {
+    if (options.echo) {
+        var one: i32 = 1;
+        const setsockopt_rc = sys.setsockopt(fd, sol_can_raw, can_raw_recv_own_msgs, @ptrCast(&one), @sizeOf(i32));
+        if (sys.errno(setsockopt_rc) != .SUCCESS) {
+            debugPrint("setsockopt(CAN_RAW_RECV_OWN_MSGS) failed", .{});
+            return CanError.SocketCanFailure;
+        }
+    }
+
+    if (options.enable_timestamps) {
         var one: i32 = 1;
         const setsockopt_rc = sys.setsockopt(fd, sys.SOL.SOCKET, sys.SO.TIMESTAMPNS_OLD, @ptrCast(&one), @sizeOf(i32));
         if (sys.errno(setsockopt_rc) != .SUCCESS) {
@@ -116,7 +127,11 @@ pub fn closeSocketCan(fd: socket_t) void {
 }
 
 pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
-    const buf: [*]const u8 = (@ptrCast(frame));
+    // `res0` carries library-side flags (see `can_frame_echo_flag`) but is
+    // reserved on the wire, e.g. when re-sending a received echo frame.
+    var wire_frame = frame.*;
+    wire_frame.res0 = 0;
+    const buf: [*]const u8 = (@ptrCast(&wire_frame));
     // TODO: consider flags
     const length = sys.sendto(
         fd,
@@ -135,10 +150,33 @@ pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
 /// Waits forever if nothing is available
 /// - you should run your own selectors before calling
 pub fn canRecv(fd: socket_t) CanFrame {
-    var _frame: CanFrame = undefined;
-    const ret = sys.recvfrom(fd, @ptrCast(&_frame), @sizeOf(CanFrame), 0, null, null);
-    _ = ret;
-    return _frame;
+    var frame: CanFrame = undefined;
+    _ = recvFrame(fd, &frame, null);
+    return frame;
+}
+
+/// Receives one frame with `recvmsg` rather than `recvfrom`, since only the
+/// former reports the `MSG_CONFIRM` flag identifying echo frames (see
+/// `OpenOptions.echo`), which is then recorded via `can_frame_echo_flag`.
+/// `control_buf`, if given, receives the ancillary data (timestamps).
+fn recvFrame(fd: socket_t, frame: *CanFrame, control_buf: ?[]align(@alignOf(sys.cmsghdr)) u8) sys.msghdr {
+    var iov = [_]posix.iovec{.{
+        .base = @ptrCast(frame),
+        .len = @sizeOf(CanFrame),
+    }};
+    var msg = sys.msghdr{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = if (control_buf) |buf| buf.ptr else null,
+        .controllen = if (control_buf) |buf| buf.len else 0,
+        .flags = 0,
+    };
+
+    _ = sys.recvmsg(fd, &msg, 0);
+    frame.res0 = if ((msg.flags & sys.MSG.CONFIRM) != 0) definitions.can_frame_echo_flag else 0;
+    return msg;
 }
 
 /// True if `fd` has `SO_TIMESTAMPNS` enabled (see `openSocketCan`).
@@ -186,22 +224,8 @@ pub fn canRecvTimestamped(fd: socket_t) definitions.TimestampedFrame {
     assert(timestampsEnabled(fd));
 
     var frame: CanFrame = undefined;
-    var iov = [_]posix.iovec{.{
-        .base = @ptrCast(&frame),
-        .len = @sizeOf(CanFrame),
-    }};
     var control_buf: [64]u8 align(@alignOf(sys.cmsghdr)) = undefined;
-    var msg = sys.msghdr{
-        .name = null,
-        .namelen = 0,
-        .iov = &iov,
-        .iovlen = 1,
-        .control = &control_buf,
-        .controllen = control_buf.len,
-        .flags = 0,
-    };
-
-    _ = sys.recvmsg(fd, &msg, 0);
+    const msg = recvFrame(fd, &frame, &control_buf);
     // `timestampsEnabled` already asserted the socket requests this
     // ancillary message, so the kernel is expected to have supplied it.
     const ns_since_epoch = recvTimestampNs(&msg) orelse unreachable;

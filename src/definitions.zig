@@ -12,6 +12,29 @@ pub const can_err_flag: u32 = 0x20000000;
 pub const can_eff_mask: u32 = 0x1FFFFFFF;
 pub const can_sff_mask: u32 = 0x000007FF;
 
+// Library-side flag bits packed into `CanFrame.res0`. That byte is reserved
+// (always 0) in the SocketCAN ABI, and the EFF/RTR/ERR bits above already
+// use up the spare high bits of `raw_can_id`, so the receive paths of both
+// backends use it to report per-frame metadata. socketcan.zig clears it
+// before handing a frame to the kernel.
+pub const can_frame_echo_flag: u8 = 0x01;
+
+/// Options shared by `openSocketCan` and `openPcan`, so both backends are
+/// configured the same way.
+pub const OpenOptions = struct {
+    /// Deliver bus errors as frames with `isError()` set instead of
+    /// dropping them (SocketCAN: `CAN_RAW_ERR_FILTER`, PCAN:
+    /// `PCAN_ALLOW_ERROR_FRAMES`).
+    allow_error_frames: bool = false,
+    /// Timestamp incoming frames so the `*Timestamped` recv functions can be
+    /// used (SocketCAN: `SO_TIMESTAMPNS`). Has no effect on PCAN, whose
+    /// driver always timestamps frames.
+    enable_timestamps: bool = false,
+    /// Receive the frames this channel sends itself, flagged with `isEcho()`
+    /// (SocketCAN: `CAN_RAW_RECV_OWN_MSGS`, PCAN: `PCAN_ALLOW_ECHO_FRAMES`).
+    echo: bool = false,
+};
+
 /// A point in time expressed as nanoseconds since the Unix epoch
 /// (CLOCK_REALTIME), used as the common timestamp format between pcan.zig
 /// (calibrated from its device-relative counter) and socketcan.zig
@@ -57,6 +80,13 @@ pub const CanFrame = extern struct {
     /// actual CAN message - see `can_id()` for how to read its error info.
     pub inline fn isError(self: CanFrame) bool {
         return (self.raw_can_id & can_err_flag) != 0;
+    }
+
+    /// True for a frame this channel sent itself and got back because it
+    /// was opened with `OpenOptions.echo`, rather than one received from
+    /// another node.
+    pub inline fn isEcho(self: CanFrame) bool {
+        return (self.res0 & can_frame_echo_flag) != 0;
     }
 
     /// The logical CAN identifier, with the EFF/RTR/ERR flag bits masked
