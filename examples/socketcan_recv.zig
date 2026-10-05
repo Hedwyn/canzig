@@ -17,18 +17,20 @@ pub fn main(init: std.process.Init) !void {
     // Number of frames to print before exiting; 0 means run until interrupted.
     const count = if (args.next()) |c| try std.fmt.parseInt(usize, c, 10) else 0;
 
-    const fd = try can.openSocketCan(interface, true);
+    const fd = try can.openSocketCan(interface, true, true);
     defer can.closeSocketCan(fd);
 
     std.debug.print("Listening on {s} (Ctrl+C to stop)...\n", .{interface});
 
     var received: usize = 0;
     while (count == 0 or received < count) : (received += 1) {
-        const frame = can.canRecv(fd);
+        const received_frame = can.canRecvTimestamped(fd);
+        const frame = received_frame.frame;
 
         std.debug.print(
-            "id=0x{x}{s}{s}{s} len={} data={x}\n",
+            "t={d}ns id=0x{x}{s}{s}{s} len={} data={x}\n",
             .{
+                received_frame.timestamp.ns_since_epoch,
                 frame.can_id(),
                 if (frame.isExtended()) "x" else "",
                 if (frame.isRtr()) " RTR" else "",

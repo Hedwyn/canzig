@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     const params = if (try ParserT.runStandalone(init)) |p| p else return;
     const can_if = params.options.interface orelse default_can_if;
 
-    const fd = try can.openSocketCan(can_if, false);
+    const fd = try can.openSocketCan(can_if, false, false);
     defer can.closeSocketCan(fd);
     const data = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const test_frame = can.CanFrame{

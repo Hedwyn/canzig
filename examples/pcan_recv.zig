@@ -26,11 +26,13 @@ pub fn main(init: std.process.Init) !void {
 
     var received: usize = 0;
     while (count == 0 or received < count) : (received += 1) {
-        const frame = pcan.canRecv(&handle);
+        const received_frame = pcan.canRecvTimestamped(&handle);
+        const frame = received_frame.frame;
 
         std.debug.print(
-            "id=0x{x}{s}{s}{s} len={} data={x}\n",
+            "t={d}ns id=0x{x}{s}{s}{s} len={} data={x}\n",
             .{
+                received_frame.timestamp.ns_since_epoch,
                 frame.can_id(),
                 if (frame.isExtended()) "x" else "",
                 if (frame.isRtr()) " RTR" else "",

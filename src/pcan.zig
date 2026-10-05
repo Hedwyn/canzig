@@ -41,6 +41,11 @@ extern "kernel32" fn CreateEventW(
 extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(cc) i32;
 extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: u32) callconv(cc) u32;
 
+/// Win32 FILETIME: 100ns intervals since 1601-01-01 UTC. Used only to read
+/// the wall clock for timestamp calibration - see `wallClockNs`.
+const FILETIME = extern struct { low: u32, high: u32 };
+extern "kernel32" fn GetSystemTimePreciseAsFileTime(lpSystemTimeAsFileTime: *FILETIME) callconv(cc) void;
+
 // Win32 WaitForSingleObject result codes actually used here (winbase.h).
 const wait_object_0: u32 = 0x00000000;
 const wait_timeout: u32 = 0x00000102;
@@ -56,6 +61,25 @@ fn sleepMs(ms: u32) void {
     } else {
         const req: std.c.timespec = .{ .sec = 0, .nsec = @intCast(@as(i64, ms) * std.time.ns_per_ms) };
         _ = std.c.nanosleep(&req, null);
+    }
+}
+
+/// Current wall-clock time as ns since the Unix epoch. Used only for
+/// timestamp calibration (see `PcanHandle.open_wall_ns`/`timestampToNs`) -
+/// like `sleepMs` above, this calls the platform's clock primitive directly
+/// rather than going through `std.time`/`std.Io`.
+fn wallClockNs() i128 {
+    if (is_windows) {
+        var file_time: FILETIME = undefined;
+        GetSystemTimePreciseAsFileTime(&file_time);
+        const filetime_100ns: i128 = (@as(i128, file_time.high) << 32) | file_time.low;
+        // FILETIME epoch (1601-01-01) is 11644473600s before the Unix epoch.
+        const unix_epoch_offset_100ns: i128 = 116444736000000000;
+        return (filetime_100ns - unix_epoch_offset_100ns) * 100;
+    } else {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+        return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
     }
 }
 
@@ -255,6 +279,13 @@ pub const PcanHandle = struct {
     /// parameter just hands back the underlying SocketCAN driver's fd, with
     /// no benefit over using socketcan.zig directly, so it's not bound here.
     event_handle: if (is_windows) HANDLE else void,
+    /// Host wall-clock time (ns since Unix epoch) taken right after
+    /// `CAN_Initialize`, when the device's own `TPCANTimestamp` counter
+    /// starts at (near) zero. Used to convert that device-relative counter
+    /// into the same epoch-based format socketcan.zig uses - see
+    /// `timestampToNs`. There is no PCAN-Basic option to toggle the
+    /// timestamp itself off: `CAN_Read` always fills it in.
+    open_wall_ns: i128,
 };
 
 // Known PCAN-USB channel names, as defined by PCAN-Basic (PCANBasic.h).
@@ -348,6 +379,10 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         debugPrint("PCAN CAN_Initialize failed for channel 0x{x} with status 0x{x}", .{ channel, init_status });
         return CanError.InitializationFailed;
     }
+    // Taken immediately after CAN_Initialize succeeds, so it lines up as
+    // closely as possible with the driver resetting its own timestamp
+    // counter to (near) zero - see `PcanHandle.open_wall_ns`.
+    const open_wall_ns = wallClockNs();
     debugPrint("Initialized PCAN channel 0x{x} at {} bit/s", .{ channel, bitrate });
 
     var handle = PcanHandle{
@@ -363,6 +398,7 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         .set_value_fn = set_value_fn,
         .get_error_text_fn = get_error_text_fn,
         .event_handle = if (is_windows) undefined else {},
+        .open_wall_ns = open_wall_ns,
     };
 
     if (is_windows) {
@@ -452,6 +488,18 @@ fn frameFromMsg(msg: TPCANMsg) CanFrame {
     };
 }
 
+/// Converts a `TPCANTimestamp` (elapsed time since `CAN_Initialize`, as
+/// milliseconds + a 16-bit overflow counter + sub-millisecond microseconds)
+/// into ns since the Unix epoch, using `handle.open_wall_ns` as the t=0
+/// reference. Drifts against wall-clock time over long sessions (host clock
+/// vs. device oscillator) - fine for the inter-frame timing this is meant
+/// to preserve, not a substitute for a precise absolute clock.
+fn timestampToNs(handle: *const PcanHandle, timestamp: TPCANTimestamp) i128 {
+    const elapsed_ms: u64 = @as(u64, timestamp.millis) + (@as(u64, timestamp.millis_overflow) << 32);
+    const elapsed_ns: i128 = @as(i128, elapsed_ms) * std.time.ns_per_ms + @as(i128, timestamp.micros) * std.time.ns_per_us;
+    return handle.open_wall_ns + elapsed_ns;
+}
+
 /// Receives a message from the CAN bus.
 /// Waits forever if nothing is available (polls the PCAN receive queue),
 /// matching socketcan.zig's `canRecv` semantics.
@@ -493,6 +541,50 @@ pub fn tryRecv(handle: *PcanHandle) CanError!?CanFrame {
     }
 
     return frameFromMsg(msg);
+}
+
+/// Same as `canRecv`, but also returns the frame's receive timestamp,
+/// normalized to ns since the Unix epoch (see `timestampToNs`).
+pub fn canRecvTimestamped(handle: *PcanHandle) definitions.TimestampedFrame {
+    var msg: TPCANMsg = undefined;
+    var timestamp: TPCANTimestamp = undefined;
+
+    while (true) {
+        const status = handle.read_fn(handle.channel, &msg, &timestamp);
+        if (status == pcan_error_ok) {
+            break;
+        }
+        if (status != pcan_error_qrcvempty) {
+            debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
+        }
+        sleepMs(1);
+    }
+
+    return .{
+        .frame = frameFromMsg(msg),
+        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, timestamp) },
+    };
+}
+
+/// Same as `tryRecv`, but also returns the frame's receive timestamp,
+/// normalized to ns since the Unix epoch (see `timestampToNs`).
+pub fn tryRecvTimestamped(handle: *PcanHandle) CanError!?definitions.TimestampedFrame {
+    var msg: TPCANMsg = undefined;
+    var timestamp: TPCANTimestamp = undefined;
+
+    const status = handle.read_fn(handle.channel, &msg, &timestamp);
+    if (status == pcan_error_qrcvempty) {
+        return null;
+    }
+    if (status != pcan_error_ok) {
+        debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
+        return CanError.ReadFailed;
+    }
+
+    return .{
+        .frame = frameFromMsg(msg),
+        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, timestamp) },
+    };
 }
 
 /// Waits up to `timeout_ms` milliseconds for the PCAN receive event to

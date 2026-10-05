@@ -12,6 +12,23 @@ pub const can_err_flag: u32 = 0x20000000;
 pub const can_eff_mask: u32 = 0x1FFFFFFF;
 pub const can_sff_mask: u32 = 0x000007FF;
 
+/// A point in time expressed as nanoseconds since the Unix epoch
+/// (CLOCK_REALTIME), used as the common timestamp format between pcan.zig
+/// (calibrated from its device-relative counter) and socketcan.zig
+/// (read straight from the kernel's SO_TIMESTAMPNS).
+pub const Timestamp = struct {
+    ns_since_epoch: i128,
+};
+
+/// A `CanFrame` paired with the time it was received.
+/// Kept separate from `CanFrame` itself rather than adding a field to it:
+/// `CanFrame`'s layout must stay identical to the SocketCAN wire struct,
+/// since socketcan.zig sends/receives it directly as raw bytes.
+pub const TimestampedFrame = struct {
+    frame: CanFrame,
+    timestamp: Timestamp,
+};
+
 /// The container for a CAN message.
 /// Requires `extern` as the memory layout has to be strictly identical
 /// to the C-version.
