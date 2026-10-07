@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     // Number of frames to print before exiting; 0 means run until interrupted.
     const count = if (args.next()) |c| try std.fmt.parseInt(usize, c, 10) else 0;
 
-    var handle = try pcan.openPcan(channel, bitrate);
+    var handle = try pcan.openPcan(channel, bitrate, true);
     defer pcan.closePcan(&handle);
 
     std.debug.print("Listening on {s} at {} bit/s (Ctrl+C to stop)...\n", .{ channel, bitrate });

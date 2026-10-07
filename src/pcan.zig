@@ -65,7 +65,7 @@ fn sleepMs(ms: u32) void {
 }
 
 /// Current wall-clock time as ns since the Unix epoch. Used only for
-/// timestamp calibration (see `PcanHandle.open_wall_ns`/`timestampToNs`) -
+/// timestamp calibration (see `timestampToNs`) -
 /// like `sleepMs` above, this calls the platform's clock primitive directly
 /// rather than going through `std.time`/`std.Io`.
 fn wallClockNs() i128 {
@@ -125,10 +125,19 @@ pub const TPCANTimestamp = extern struct {
 // PCAN status/error codes (subset actually used here)
 const pcan_error_ok: TPCANStatus = 0x00000;
 const pcan_error_qrcvempty: TPCANStatus = 0x00020;
+// Bus-state codes: `CAN_Read` reports bus error conditions through its
+// return value, independently of `pcan_allow_error_frames`. They describe
+// the bus, not a failure of the read itself - see `readMsg`.
+const pcan_error_buslight: TPCANStatus = 0x00004;
+const pcan_error_busheavy: TPCANStatus = 0x00008;
+const pcan_error_buspassive: TPCANStatus = 0x40000;
+const pcan_error_bus_warnings: TPCANStatus = pcan_error_buslight | pcan_error_busheavy | pcan_error_buspassive;
 
 // PCAN parameters
+const pcan_allow_status_frames: TPCANParameter = 0x1E;
 const pcan_allow_error_frames: TPCANParameter = 0x20;
 const pcan_receive_event: TPCANParameter = 0x03;
+const pcan_parameter_off: u32 = 0x00;
 const pcan_parameter_on: u32 = 0x01;
 
 // PCAN message types
@@ -279,13 +288,15 @@ pub const PcanHandle = struct {
     /// parameter just hands back the underlying SocketCAN driver's fd, with
     /// no benefit over using socketcan.zig directly, so it's not bound here.
     event_handle: if (is_windows) HANDLE else void,
-    /// Host wall-clock time (ns since Unix epoch) taken right after
-    /// `CAN_Initialize`, when the device's own `TPCANTimestamp` counter
-    /// starts at (near) zero. Used to convert that device-relative counter
-    /// into the same epoch-based format socketcan.zig uses - see
-    /// `timestampToNs`. There is no PCAN-Basic option to toggle the
-    /// timestamp itself off: `CAN_Read` always fills it in.
-    open_wall_ns: i128,
+    /// Offset (ns) mapping the driver's `TPCANTimestamp` counter onto host
+    /// wall-clock time (ns since Unix epoch), so timestamps share
+    /// socketcan.zig's epoch-based format - see `timestampToNs`. The
+    /// counter's origin is driver-specific (reset by `CAN_Initialize` on
+    /// Linux, but counting from system start on Windows), so the offset is
+    /// calibrated from the frames themselves rather than assumed.
+    /// `null` until the first frame is read. There is no PCAN-Basic option
+    /// to toggle the timestamp itself off: `CAN_Read` always fills it in.
+    clock_offset_ns: ?i128 = null,
 };
 
 // Known PCAN-USB channel names, as defined by PCAN-Basic (PCANBasic.h).
@@ -356,8 +367,11 @@ fn pcanBaudrate(bitrate: u32) TPCANBaudrate {
 /// bitrate (in bit/s). Loads the PCAN-Basic library (PCANBasic.dll on
 /// Windows, libpcanbasic.so on Linux) and resolves the functions needed to
 /// operate the channel.
+/// `allow_error_frames` controls whether bus errors and status changes are
+/// delivered as (pseudo) frames, with `isError()` set (see `frameFromMsg`),
+/// rather than dropped - same semantics as socketcan.zig's `openSocketCan`.
 /// Returns CanError on failure.
-pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
+pub fn openPcan(channel_name: []const u8, bitrate: u32, allow_error_frames: bool) !PcanHandle {
     var lib = try loadLib();
     errdefer lib.close();
 
@@ -379,10 +393,6 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         debugPrint("PCAN CAN_Initialize failed for channel 0x{x} with status 0x{x}", .{ channel, init_status });
         return CanError.InitializationFailed;
     }
-    // Taken immediately after CAN_Initialize succeeds, so it lines up as
-    // closely as possible with the driver resetting its own timestamp
-    // counter to (near) zero - see `PcanHandle.open_wall_ns`.
-    const open_wall_ns = wallClockNs();
     debugPrint("Initialized PCAN channel 0x{x} at {} bit/s", .{ channel, bitrate });
 
     var handle = PcanHandle{
@@ -398,7 +408,6 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         .set_value_fn = set_value_fn,
         .get_error_text_fn = get_error_text_fn,
         .event_handle = if (is_windows) undefined else {},
-        .open_wall_ns = open_wall_ns,
     };
 
     if (is_windows) {
@@ -419,10 +428,12 @@ pub fn openPcan(channel_name: []const u8, bitrate: u32) !PcanHandle {
         handle.event_handle = event_handle;
     }
 
-    // Report bus errors as (pseudo) frames rather than only surfacing them
-    // through CAN_GetStatus.
-    var allow_error_frames: u32 = pcan_parameter_on;
-    _ = handle.set_value_fn(handle.channel, pcan_allow_error_frames, @ptrCast(&allow_error_frames), @sizeOf(u32));
+    // Set explicitly both ways: PCAN-Basic delivers status frames by
+    // default, which would otherwise leak through with
+    // `allow_error_frames = false`.
+    var error_frames_value: u32 = if (allow_error_frames) pcan_parameter_on else pcan_parameter_off;
+    _ = handle.set_value_fn(handle.channel, pcan_allow_error_frames, @ptrCast(&error_frames_value), @sizeOf(u32));
+    _ = handle.set_value_fn(handle.channel, pcan_allow_status_frames, @ptrCast(&error_frames_value), @sizeOf(u32));
 
     return handle;
 }
@@ -488,16 +499,50 @@ fn frameFromMsg(msg: TPCANMsg) CanFrame {
     };
 }
 
-/// Converts a `TPCANTimestamp` (elapsed time since `CAN_Initialize`, as
-/// milliseconds + a 16-bit overflow counter + sub-millisecond microseconds)
-/// into ns since the Unix epoch, using `handle.open_wall_ns` as the t=0
-/// reference. Drifts against wall-clock time over long sessions (host clock
-/// vs. device oscillator) - fine for the inter-frame timing this is meant
-/// to preserve, not a substitute for a precise absolute clock.
-fn timestampToNs(handle: *const PcanHandle, timestamp: TPCANTimestamp) i128 {
+/// Converts a `TPCANTimestamp` (milliseconds + a 16-bit overflow counter +
+/// sub-millisecond microseconds, from a driver-specific origin) into ns
+/// since the Unix epoch. Must be called right after the frame is read: a
+/// frame is always read after it was received, so `wall clock now - device
+/// time` is an upper bound of the true offset between both clocks, and the
+/// smallest one seen so far is kept as the best estimate (see
+/// `PcanHandle.clock_offset_ns`). Drifts against wall-clock time over long
+/// sessions (host clock vs. device oscillator) - fine for the inter-frame
+/// timing this is meant to preserve, not a substitute for a precise
+/// absolute clock.
+fn timestampToNs(handle: *PcanHandle, timestamp: TPCANTimestamp) i128 {
     const elapsed_ms: u64 = @as(u64, timestamp.millis) + (@as(u64, timestamp.millis_overflow) << 32);
     const elapsed_ns: i128 = @as(i128, elapsed_ms) * std.time.ns_per_ms + @as(i128, timestamp.micros) * std.time.ns_per_us;
-    return handle.open_wall_ns + elapsed_ns;
+    const candidate_offset_ns = wallClockNs() - elapsed_ns;
+    if (handle.clock_offset_ns == null or candidate_offset_ns < handle.clock_offset_ns.?) {
+        handle.clock_offset_ns = candidate_offset_ns;
+    }
+    return elapsed_ns + handle.clock_offset_ns.?;
+}
+
+const RawMsg = struct { msg: TPCANMsg, timestamp: TPCANTimestamp };
+
+/// Bounds how many consecutive bus-state reports `readMsg` skips in a single
+/// call, so a bus stuck in an error condition can't make it spin forever.
+const max_bus_state_reads = 8;
+
+/// Single non-blocking `CAN_Read`. Returns `null` if the receive queue is
+/// empty. Bus warnings (see `pcan_error_bus_warnings`) are logged and
+/// skipped rather than failing the read: transient bus errors are expected
+/// in normal operation (e.g. a node glitching the bus while resetting), and
+/// frames may still be queued behind them.
+fn readMsg(handle: *PcanHandle) CanError!?RawMsg {
+    var raw: RawMsg = undefined;
+    for (0..max_bus_state_reads) |_| {
+        const status = handle.read_fn(handle.channel, &raw.msg, &raw.timestamp);
+        if (status == pcan_error_ok) return raw;
+        if ((status & pcan_error_qrcvempty) != 0) return null;
+        if ((status & ~pcan_error_bus_warnings) != 0) {
+            debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
+            return CanError.ReadFailed;
+        }
+        debugPrint("PCAN CAN_Read reported a bus warning: status 0x{x}", .{status});
+    }
+    return null;
 }
 
 /// Receives a message from the CAN bus.
@@ -528,19 +573,8 @@ pub fn canRecv(handle: *PcanHandle) CanFrame {
 /// queue by calling `tryRecv` in a loop until it returns `null`, since one
 /// signal can correspond to more than one queued frame.
 pub fn tryRecv(handle: *PcanHandle) CanError!?CanFrame {
-    var msg: TPCANMsg = undefined;
-    var timestamp: TPCANTimestamp = undefined;
-
-    const status = handle.read_fn(handle.channel, &msg, &timestamp);
-    if (status == pcan_error_qrcvempty) {
-        return null;
-    }
-    if (status != pcan_error_ok) {
-        debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
-        return CanError.ReadFailed;
-    }
-
-    return frameFromMsg(msg);
+    const raw = try readMsg(handle) orelse return null;
+    return frameFromMsg(raw.msg);
 }
 
 /// Same as `canRecv`, but also returns the frame's receive timestamp,
@@ -569,21 +603,10 @@ pub fn canRecvTimestamped(handle: *PcanHandle) definitions.TimestampedFrame {
 /// Same as `tryRecv`, but also returns the frame's receive timestamp,
 /// normalized to ns since the Unix epoch (see `timestampToNs`).
 pub fn tryRecvTimestamped(handle: *PcanHandle) CanError!?definitions.TimestampedFrame {
-    var msg: TPCANMsg = undefined;
-    var timestamp: TPCANTimestamp = undefined;
-
-    const status = handle.read_fn(handle.channel, &msg, &timestamp);
-    if (status == pcan_error_qrcvempty) {
-        return null;
-    }
-    if (status != pcan_error_ok) {
-        debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
-        return CanError.ReadFailed;
-    }
-
+    const raw = try readMsg(handle) orelse return null;
     return .{
-        .frame = frameFromMsg(msg),
-        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, timestamp) },
+        .frame = frameFromMsg(raw.msg),
+        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, raw.timestamp) },
     };
 }
 

@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
         frame.data[i] = try std.fmt.parseInt(u8, payload_arg[i * 2 .. i * 2 + 2], 16);
     }
 
-    var handle = try pcan.openPcan(channel, bitrate);
+    var handle = try pcan.openPcan(channel, bitrate, true);
     defer pcan.closePcan(&handle);
 
     const sent = try pcan.canSend(&handle, &frame);

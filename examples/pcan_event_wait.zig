@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var handle = try pcan.openPcan(channel, bitrate);
+    var handle = try pcan.openPcan(channel, bitrate, true);
     defer pcan.closePcan(&handle);
 
     std.debug.print("Waiting for events on {s} at {} bit/s (Ctrl+C to stop)...\n", .{ channel, bitrate });
