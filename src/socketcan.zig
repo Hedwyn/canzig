@@ -133,7 +133,9 @@ pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
     wire_frame.res0 = 0;
     const buf: [*]const u8 = (@ptrCast(&wire_frame));
     // TODO: consider flags
-    const length = sys.sendto(
+    // Return type differs between raw syscalls (usize, errno-encoded) and
+    // libc (isize, -1 on error); `errno` decodes both.
+    const sendto_rc = sys.sendto(
         fd,
         buf,
         @sizeOf(CanFrame),
@@ -141,10 +143,10 @@ pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
         null,
         0,
     );
-    if (length < 0) {
+    if (sys.errno(sendto_rc) != .SUCCESS) {
         return CanError.SendFailed;
     }
-    return length;
+    return @intCast(sendto_rc);
 }
 /// Receives a message from the CAN bus
 /// Waits forever if nothing is available
