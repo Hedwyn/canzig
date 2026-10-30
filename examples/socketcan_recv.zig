@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
 
     var received: usize = 0;
     while (count == 0 or received < count) : (received += 1) {
-        const received_frame = can.canRecvTimestamped(fd);
+        const received_frame = try can.canRecvTimestamped(fd);
         const frame = received_frame.frame;
 
         std.debug.print(

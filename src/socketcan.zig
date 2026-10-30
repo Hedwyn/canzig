@@ -49,9 +49,13 @@ pub const can_sff_mask = definitions.can_sff_mask;
 pub const OpenOptions = definitions.OpenOptions;
 
 /// Can-related errors
-const CanError = error{
+pub const CanError = error{
     SendFailed,
+    ReadFailed,
     InterfaceNotFound,
+    /// The interface exists but is administratively down (e.g.
+    /// `ip link set can0 up` was not run, or it went down while in use).
+    InterfaceDown,
     SocketCanFailure,
 };
 
@@ -67,6 +71,7 @@ pub fn openSocketCan(can_if_name: []const u8, options: OpenOptions) !socket_t {
         return CanError.SocketCanFailure;
     }
     const fd: socket_t = @intCast(socket_rc);
+    errdefer closeSocketCan(fd);
     debugPrint("Opened socket's fileno is {}", .{fd});
 
     if (options.allow_error_frames) {
@@ -108,9 +113,25 @@ pub fn openSocketCan(can_if_name: []const u8, options: OpenOptions) !socket_t {
         debugPrint("ioctl reported an error when trying to get the can interface index", .{});
         return CanError.InterfaceNotFound;
     }
-    debugPrint("CAN interface index is {}", .{ifreq.ifru.ivalue});
+    const ifindex = ifreq.ifru.ivalue;
+    debugPrint("CAN interface index is {}", .{ifindex});
+
+    // A DOWN interface still has an index and bind() succeeds on it (the
+    // kernel just parks ENETDOWN in the socket's pending error, which
+    // surfaces on the first recv), so check explicitly. `ifru` is a union:
+    // the index above has been copied out before it gets overwritten.
+    const flags_rc = sys.ioctl(fd, sys.SIOCGIFFLAGS, @intFromPtr(&ifreq));
+    if (sys.errno(flags_rc) != .SUCCESS) {
+        debugPrint("ioctl reported an error when trying to get the can interface flags", .{});
+        return CanError.SocketCanFailure;
+    }
+    if (!ifreq.ifru.flags.UP) {
+        debugPrint("CAN interface {s} exists but is down", .{can_if_name});
+        return CanError.InterfaceDown;
+    }
+
     var can_addr: SockaddrCan = .{
-        .can_ifindex = ifreq.ifru.ivalue,
+        .can_ifindex = ifindex,
     };
     const addr: *posix.sockaddr = @ptrCast(&can_addr);
     const bind_rc = sys.bind(fd, addr, @sizeOf(SockaddrCan));
@@ -143,17 +164,19 @@ pub fn canSend(fd: socket_t, frame: *const CanFrame) CanError!usize {
         null,
         0,
     );
-    if (sys.errno(sendto_rc) != .SUCCESS) {
-        return CanError.SendFailed;
-    }
-    return @intCast(sendto_rc);
+    return switch (sys.errno(sendto_rc)) {
+        .SUCCESS => @intCast(sendto_rc),
+        .NETDOWN => CanError.InterfaceDown,
+        else => CanError.SendFailed,
+    };
 }
 /// Receives a message from the CAN bus
 /// Waits forever if nothing is available
 /// - you should run your own selectors before calling
-pub fn canRecv(fd: socket_t) CanFrame {
+/// Fails with `InterfaceDown` if the interface is (or went) down.
+pub fn canRecv(fd: socket_t) CanError!CanFrame {
     var frame: CanFrame = undefined;
-    _ = recvFrame(fd, &frame, null);
+    _ = try recvFrame(fd, &frame, null);
     return frame;
 }
 
@@ -161,7 +184,7 @@ pub fn canRecv(fd: socket_t) CanFrame {
 /// former reports the `MSG_CONFIRM` flag identifying echo frames (see
 /// `OpenOptions.echo`), which is then recorded via `can_frame_echo_flag`.
 /// `control_buf`, if given, receives the ancillary data (timestamps).
-fn recvFrame(fd: socket_t, frame: *CanFrame, control_buf: ?[]align(@alignOf(sys.cmsghdr)) u8) sys.msghdr {
+fn recvFrame(fd: socket_t, frame: *CanFrame, control_buf: ?[]align(@alignOf(sys.cmsghdr)) u8) CanError!sys.msghdr {
     var iov = [_]posix.iovec{.{
         .base = @ptrCast(frame),
         .len = @sizeOf(CanFrame),
@@ -176,7 +199,12 @@ fn recvFrame(fd: socket_t, frame: *CanFrame, control_buf: ?[]align(@alignOf(sys.
         .flags = 0,
     };
 
-    _ = sys.recvmsg(fd, &msg, 0);
+    const recv_rc = sys.recvmsg(fd, &msg, 0);
+    switch (sys.errno(recv_rc)) {
+        .SUCCESS => {},
+        .NETDOWN => return CanError.InterfaceDown,
+        else => return CanError.ReadFailed,
+    }
     frame.res0 = if ((msg.flags & sys.MSG.CONFIRM) != 0) definitions.can_frame_echo_flag else 0;
     return msg;
 }
@@ -222,15 +250,15 @@ fn recvTimestampNs(msg: *const sys.msghdr) ?i128 {
 /// Same as `canRecv`, but also returns the kernel's receive timestamp for
 /// the frame. Requires the socket to have been opened with
 /// `enable_timestamps = true` (see `openSocketCan`).
-pub fn canRecvTimestamped(fd: socket_t) definitions.TimestampedFrame {
+pub fn canRecvTimestamped(fd: socket_t) CanError!definitions.TimestampedFrame {
     assert(timestampsEnabled(fd));
 
     var frame: CanFrame = undefined;
     var control_buf: [64]u8 align(@alignOf(sys.cmsghdr)) = undefined;
-    const msg = recvFrame(fd, &frame, &control_buf);
+    const msg = try recvFrame(fd, &frame, &control_buf);
     // `timestampsEnabled` already asserted the socket requests this
     // ancillary message, so the kernel is expected to have supplied it.
-    const ns_since_epoch = recvTimestampNs(&msg) orelse unreachable;
+    const ns_since_epoch = recvTimestampNs(&msg) orelse return CanError.ReadFailed;
 
     return .{
         .frame = frame,

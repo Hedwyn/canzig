@@ -84,7 +84,7 @@ fn wallClockNs() i128 {
 }
 
 /// Can-related errors
-const CanError = error{
+pub const CanError = error{
     SendFailed,
     ReadFailed,
     InterfaceNotFound,
@@ -559,25 +559,24 @@ fn readMsg(handle: *PcanHandle) CanError!?RawMsg {
     return null;
 }
 
-/// Receives a message from the CAN bus.
-/// Waits forever if nothing is available (polls the PCAN receive queue),
-/// matching socketcan.zig's `canRecv` semantics.
-pub fn canRecv(handle: *PcanHandle) CanFrame {
-    var msg: TPCANMsg = undefined;
-    var timestamp: TPCANTimestamp = undefined;
-
+/// Polls the receive queue until a frame arrives, sleeping 1ms between
+/// attempts. Fails with `ReadFailed` on a real driver error (e.g. the adapter
+/// was unplugged) instead of polling forever; bus warnings are skipped, see
+/// `readMsg`.
+fn recvBlocking(handle: *PcanHandle) CanError!RawMsg {
     while (true) {
-        const status = handle.read_fn(handle.channel, &msg, &timestamp);
-        if (status == pcan_error_ok) {
-            break;
-        }
-        if (status != pcan_error_qrcvempty) {
-            debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
-        }
+        if (try readMsg(handle)) |raw| return raw;
         sleepMs(1);
     }
+}
 
-    return frameFromMsg(msg);
+/// Receives a message from the CAN bus.
+/// Waits forever if nothing is available (polls the PCAN receive queue),
+/// matching socketcan.zig's `canRecv` semantics. Fails with `ReadFailed` if
+/// the driver reports an error.
+pub fn canRecv(handle: *PcanHandle) CanError!CanFrame {
+    const raw = try recvBlocking(handle);
+    return frameFromMsg(raw.msg);
 }
 
 /// Attempts a single, non-blocking read from the PCAN receive queue.
@@ -593,24 +592,11 @@ pub fn tryRecv(handle: *PcanHandle) CanError!?CanFrame {
 
 /// Same as `canRecv`, but also returns the frame's receive timestamp,
 /// normalized to ns since the Unix epoch (see `timestampToNs`).
-pub fn canRecvTimestamped(handle: *PcanHandle) definitions.TimestampedFrame {
-    var msg: TPCANMsg = undefined;
-    var timestamp: TPCANTimestamp = undefined;
-
-    while (true) {
-        const status = handle.read_fn(handle.channel, &msg, &timestamp);
-        if (status == pcan_error_ok) {
-            break;
-        }
-        if (status != pcan_error_qrcvempty) {
-            debugPrint("PCAN CAN_Read reported an error: status 0x{x}", .{status});
-        }
-        sleepMs(1);
-    }
-
+pub fn canRecvTimestamped(handle: *PcanHandle) CanError!definitions.TimestampedFrame {
+    const raw = try recvBlocking(handle);
     return .{
-        .frame = frameFromMsg(msg),
-        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, timestamp) },
+        .frame = frameFromMsg(raw.msg),
+        .timestamp = .{ .ns_since_epoch = timestampToNs(handle, raw.timestamp) },
     };
 }
 
