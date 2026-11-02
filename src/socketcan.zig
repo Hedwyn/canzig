@@ -120,7 +120,7 @@ pub fn openSocketCan(can_if_name: []const u8, options: OpenOptions) !socket_t {
     // kernel just parks ENETDOWN in the socket's pending error, which
     // surfaces on the first recv), so check explicitly. `ifru` is a union:
     // the index above has been copied out before it gets overwritten.
-    const flags_rc = sys.ioctl(fd, sys.SIOCGIFFLAGS, @intFromPtr(&ifreq));
+    const flags_rc = sys.ioctl(fd, std.os.linux.SIOCGIFFLAGS, @intFromPtr(&ifreq));
     if (sys.errno(flags_rc) != .SUCCESS) {
         debugPrint("ioctl reported an error when trying to get the can interface flags", .{});
         return CanError.SocketCanFailure;
